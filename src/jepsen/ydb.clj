@@ -195,8 +195,8 @@
      (catch UnexpectedResultException e#
        (let [status# (.getStatus e#)
              status-code# (.getCode status#)]
-         (case status-code#
-           StatusCode/ABORTED (assoc ~op :type :fail, :error [:aborted (.toString status#)])
+         (if (= status-code# StatusCode/ABORTED)
+           (assoc ~op :type :fail, :error [:aborted (.toString status#)])
            (assoc ~op :type :fail, :error [:unexpected-result (.toString status#)]))))))
 
 (defmacro once-per-cluster
