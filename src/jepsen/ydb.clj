@@ -39,8 +39,9 @@
       (info node "tearing down YDB" version))))
 
 (defn build-transport
-  [node]
-  (let [conn-string (str "grpc://" node ":2135?database=/ydb_vla_dev03/db1")]
+  [node db-name]
+  (let [conn-string (str "grpc://" node ":2135?database=" db-name)]
+    ;; (info "connecting to" conn-string)
     (-> (GrpcTransport/forConnectionString conn-string)
         .build)))
 
@@ -203,10 +204,10 @@
   `(locking ~atomic-bool
      (when (compare-and-set! ~atomic-bool false true) ~@body)))
 
-(defrecord Client [transport table-client setup?]
+(defrecord Client [db-name transport table-client setup?]
   client/Client
   (open! [this test node]
-    (let [transport (build-transport node)
+    (let [transport (build-transport node db-name)
           table-client (build-table-client transport)]
       (assoc this :transport transport :table-client table-client)))
   
@@ -238,7 +239,7 @@
                                              :max-txn-length
                                              :max-writes-per-key])
                           :consistency-models [:strict-serializable]))
-      (assoc :client (Client. nil nil (atom false)))))
+      (assoc :client (Client. (:db-name opts) nil nil (atom false)))))
 
 (defn ydb-test
   "Tests YDB"
@@ -292,6 +293,9 @@
 (def cli-opts
   "Command line options"
   [
+   [nil "--db-name DBNAME" "YDB database name."
+    :default "/local"]
+
    [nil "--key-count NUM" "Number of keys in active rotation."
     :default  10
     :parse-fn parse-long
