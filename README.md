@@ -9,7 +9,7 @@ Create a `~/ydb-nodes.txt` file that lists your YDB cluster nodes.
 Example command for running the test:
 
 ```
-lein run test --nodes-file ~/ydb-nodes.txt --db-name /your/db/name --username $USER --concurrency 10n --key-count 100 --max-writes-per-key 1024 --max-txn-length 8
+lein run test --nodes-file ~/ydb-nodes.txt --db-name /your/db/name --username $USER --concurrency 10n --key-count 100 --max-writes-per-key 1000 --max-txn-length 8
 ```
 
 ## License
