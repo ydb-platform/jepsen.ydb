@@ -34,7 +34,7 @@
   (reify db/DB
     (setup! [_ test node]
       (info node "installing YDB" version))
-    
+
     (teardown! [_ test node]
       (info node "tearing down YDB" version))))
 
@@ -64,12 +64,74 @@
      (let [r# (do ~@body)]
        r#)))
 
+(defprotocol ITransaction
+  "Represents a serializable read-write transaction"
+
+  (id [this]
+    "Returns the tranasction id")
+
+  (execute [this query params]
+    "Execute a query with the specified params")
+
+  (commit! [this]
+    "Commit the transaction, may throw an error when it fails.")
+
+  (rollback! [this]
+    "Rollback the transaction, doesn't throw on failure, no-op after commit.")
+
+  (commit-next! [this]
+    "Will cause the next execute to implicitly commit the transaction"))
+
+(defn tx-control-for-execute
+  [tx-id commit]
+  (-> (if (= tx-id nil)
+        (TxControl/serializableRw)
+        (TxControl/id tx-id))
+      (.setCommitTx commit)))
+
+(deftype Transaction [session
+                      ^:unsynchronized-mutable tx-id
+                      ^:unsynchronized-mutable commit-next]
+  ITransaction
+  (id [this]
+    tx-id)
+
+  (execute [this query params]
+    ;; (info "executing tx query:" query "in tx" (id this) (if commit-next "with auto commit" nil))
+    (let [tx-control (tx-control-for-execute tx-id commit-next)
+          result (-> session
+                     (.executeDataQuery query tx-control params)
+                     .join
+                     .getValue)]
+      (if commit-next
+        ; Clear tx-id when we successfully commit implicitly
+        (set! tx-id nil)
+        ; Remember tx-id when we start a new transaction
+        (when (= tx-id nil)
+          (set! tx-id (.getTxId result))))
+      result))
+
+  (commit! [this]
+    (when (not (= tx-id nil))
+      (-> session
+          (.commitTransaction tx-id (CommitTxSettings.))
+          .join
+          .expectSuccess)
+      (set! tx-id nil)))
+
+  (rollback! [this]
+    (when (not (= tx-id nil))
+      (-> session
+          (.rollbackTransaction tx-id (RollbackTxSettings.))
+          .join)
+      (set! tx-id nil)))
+
+  (commit-next! [this]
+    (set! commit-next true)))
+
 (defn begin-transaction
   [session]
-  (-> session
-      (.beginTransaction Transaction$Mode/SERIALIZABLE_READ_WRITE (BeginTxSettings.))
-      .join
-      .getValue))
+  (Transaction. session nil false))
 
 (defmacro with-transaction
   [[tx-name session] & body]
@@ -78,16 +140,11 @@
      (try
        (let [r# (do ~@body)]
         ;;  (info "commiting transaction" (.getId ~tx-name))
-         (-> ~tx-name
-             (.commit (CommitTxSettings.))
-             .join
-             .expectSuccess)
+         (commit! ~tx-name)
          r#)
        (catch Exception e#
         ;;  (info "rolling back transaction" (.getId ~tx-name))
-         (-> ~tx-name
-             (.rollback (RollbackTxSettings.))
-             .join)
+         (rollback! ~tx-name)
          (throw e#)))))
 
 (defn execute-scheme-query
@@ -116,16 +173,30 @@
   (with-session [session table-client]
     (execute-scheme-query session "DROP TABLE IF EXISTS jepsen_test;")))
 
-(defn execute-tx-query
-  [session tx query params]
-  ;; (info "executing tx query:" query "in tx" (.getId tx))
-  (-> session
-      (.executeDataQuery query (-> (TxControl/id tx) (.setCommitTx false)) params)
-      .join
-      .getValue))
+(defn execute-list-read
+  "Executes a list read for the given key k. Works only when the list has at most 1k values."
+  [tx k]
+  (let [query "DECLARE $key AS Int64;
+               SELECT index, value FROM jepsen_test
+               WHERE key = $key
+               ORDER BY index;"
+        params (Params/of "$key" (PrimitiveValue/newInt64 k))
+        query-result (execute tx query params)
+        rs (. query-result getResultSet 0)
+        result (ArrayList.)]
+    (assert (not (.isTruncated rs)) "List read result was truncated")
+    (while (. rs next)
+      (let [index (-> rs (.getColumn 0) .getInt64)
+            value (-> rs (.getColumn 1) .getInt64)
+            expectedIndex (.size result)]
+        (assert (= index expectedIndex) "List indexes are not ordered correctly")
+        (. result add value)))
+    (if (> (.size result) 0)
+      (vec result)
+      nil)))
 
 (defn execute-list-read-chunk
-  [session tx k start count]
+  [tx k start count]
   (let [query "DECLARE $key AS Int64;
                DECLARE $start AS Int64;
                DECLARE $end AS Int64;
@@ -135,7 +206,7 @@
         params (Params/of "$key" (PrimitiveValue/newInt64 k)
                           "$start" (PrimitiveValue/newInt64 start)
                           "$end" (PrimitiveValue/newInt64 (+ start (- count 1))))
-        result (execute-tx-query session tx query params)
+        result (execute tx query params)
         rs (. result getResultSet 0)
         l (ArrayList.)]
     (while (. rs next)
@@ -146,11 +217,12 @@
         (. l add value)))
     l))
 
-(defn execute-list-read
-  [session tx k]
+(defn execute-list-read-unlimited
+  "Executes a list read for the given key k. Works when the list has more than 1k values."
+  [tx k]
   (let [result (ArrayList.)]
     (loop []
-      (let [l (execute-list-read-chunk session tx k (.size result) 1000)]
+      (let [l (execute-list-read-chunk tx k (.size result) 1000)]
         (. result addAll l)
         (if (< (.size l) 1000)
           result
@@ -160,33 +232,28 @@
       nil)))
 
 (defn execute-list-append
-  [session tx k v]
+  [tx k v]
   (let [query "DECLARE $key AS Int64;
                DECLARE $value AS Int64;
                $next_index = (SELECT COALESCE(MAX(index) + 1, 0) FROM jepsen_test WHERE key = $key);
                UPSERT INTO jepsen_test (key, index, value) VALUES ($key, $next_index, $value);"
         params (Params/of "$key" (PrimitiveValue/newInt64 k)
                           "$value" (PrimitiveValue/newInt64 v))]
-    (execute-tx-query session tx query params)))
+    (execute tx query params)))
 
 (defn apply-mop!
-  [session tx [f k v :as mop]]
+  [tx [f k v :as mop]]
   (case f
-    :r [f k (execute-list-read session tx k)]
+    :r [f k (execute-list-read tx k)]
     :append (do
-              (execute-list-append session tx k v)
+              (execute-list-append tx k v)
               mop)))
 
-(defn do_basic_testing
-  [table-client]
-  (info "appending to list")
-  (with-session [session table-client]
-    (with-transaction [tx session]
-      (execute-list-append session tx -1 42)))
-  (info "reading from list")
-  (with-session [session table-client]
-    (with-transaction [tx session]
-      (info "read result:" (execute-list-read session tx -1)))))
+(defn apply-mop-with-auto-commit-last!
+  [tx mop index count]
+  (when (= index (dec count))
+    (commit-next! tx))
+  (apply-mop! tx mop))
 
 (defmacro with-errors
   [op & body]
@@ -210,7 +277,7 @@
     (let [transport (build-transport node db-name)
           table-client (build-table-client transport)]
       (assoc this :transport transport :table-client table-client)))
-  
+
   (setup! [this test]
     (once-per-cluster
      setup?
@@ -223,11 +290,15 @@
     (with-errors op
       (with-session [session table-client]
         (with-transaction [tx session]
-          (let [txn' (mapv (partial apply-mop! session tx) (:value op))]
+          (let [txn (:value op)
+                txn' (mapv (partial apply-mop-with-auto-commit-last! tx)
+                           txn
+                           (iterate inc 0)
+                           (repeat (count txn)))]
             (assoc op :type :ok, :value txn'))))))
-  
+
   (teardown! [this test])
-  
+
   (close! [this test]
     (.close table-client)
     (.close transport)))
@@ -245,7 +316,7 @@
   "Tests YDB"
   [opts]
   (let [workload (append-workload opts)
-        db (db "stable-24-1-1")
+        db (db "stable-24-1-1")]
         ;; nemesis  (case (:db opts)
         ;;             :none nil
         ;;             (nc/nemesis-package
@@ -256,14 +327,13 @@
         ;;               :pause {:targets [:one]}
         ;;               :kill  {:targets [:one :all]}
         ;;               :interval (:nemesis-interval opts)}))
-        ]
+
     (merge tests/noop-test
            opts
            {:name "ydb"
             :db db
             :checker (checker/compose
-                      {
-                      ;;  :perf (checker/perf
+                      {;;  :perf (checker/perf
                       ;;         {:nemeses (:perf nemesis)})
                       ;;  :clock (checker/clock-plot)
                       ;;  :stats (checker/stats)
@@ -274,8 +344,8 @@
             :generator (->> (:generator workload)
                             (gen/stagger (/ (:rate opts)))
                             (gen/nemesis nil)
-                            (gen/time-limit (:time-limit opts)))
-            })))
+                            (gen/time-limit (:time-limit opts)))})))
+
 
 (def special-nemeses
   "A map of special nemesis names to collections of faults"
@@ -292,8 +362,7 @@
 
 (def cli-opts
   "Command line options"
-  [
-   [nil "--db-name DBNAME" "YDB database name."
+  [[nil "--db-name DBNAME" "YDB database name."
     :default "/local"]
 
    [nil "--key-count NUM" "Number of keys in active rotation."
@@ -305,16 +374,16 @@
     :default  4
     :parse-fn parse-long
     :validate [pos? "Must be a positive integer"]]
-  
+
    [nil "--max-writes-per-key NUM" "Maximum number of writes to any given key."
     :default  16
     :parse-fn parse-long
     :validate [pos? "Must be a positive integer."]]
 
    ["-r" "--rate HZ" "Approximate request rate, in hz"
-       :default 100
-       :parse-fn read-string
-       :validate [pos? "Must be a positive number."]]
+    :default 100
+    :parse-fn read-string
+    :validate [pos? "Must be a positive number."]]
 
    [nil "--nemesis FAULTS" "A comma-separated list of nemesis faults to enable"
     :parse-fn parse-nemesis-spec
@@ -324,9 +393,9 @@
    [nil "--nemesis-interval SECS" "Roughly how long between nemesis operations."
     :default 5
     :parse-fn read-string
-    :validate [pos? "Must be a positive number."]]
+    :validate [pos? "Must be a positive number."]]])
 
-   ])
+
 
 (defn -main
   "Handles command line arguments."
