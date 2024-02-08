@@ -264,7 +264,7 @@
              status-code# (.getCode status#)]
          (if (= status-code# StatusCode/ABORTED)
            (assoc ~op :type :fail, :error [:aborted (.toString status#)])
-           (assoc ~op :type :fail, :error [:unexpected-result (.toString status#)]))))))
+           (assoc ~op :type :info, :error [:unexpected-result (.toString status#)]))))))
 
 (defmacro once-per-cluster
   [atomic-bool & body]
