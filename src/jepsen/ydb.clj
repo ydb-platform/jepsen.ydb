@@ -198,7 +198,12 @@
            StatusCode/ABORTED (assoc ~op :type :fail, :error [:aborted (.toString status#)])
            (assoc ~op :type :fail, :error [:unexpected-result (.toString status#)]))))))
 
-(defrecord Client [transport table-client]
+(defmacro once-per-cluster
+  [atomic-bool & body]
+  `(locking ~atomic-bool
+     (when (compare-and-set! ~atomic-bool false true) ~@body)))
+
+(defrecord Client [transport table-client setup?]
   client/Client
   (open! [this test node]
     (let [transport (build-transport node)
@@ -206,9 +211,11 @@
       (assoc this :transport transport :table-client table-client)))
   
   (setup! [this test]
-    (drop-initial-tables table-client)
-    (create-initial-tables table-client))
-  
+    (once-per-cluster
+     setup?
+     (drop-initial-tables table-client)
+     (create-initial-tables table-client)))
+
   (invoke! [_ test op]
     ; TODO: handle known errors!
     ;; (info "processing op:" op)
@@ -231,7 +238,7 @@
                                              :max-txn-length
                                              :max-writes-per-key])
                           :consistency-models [:strict-serializable]))
-      (assoc :client (Client. nil nil))))
+      (assoc :client (Client. nil nil (atom false)))))
 
 (defn ydb-test
   "Tests YDB"
