@@ -4,6 +4,8 @@ A Clojure library for testing YDB with Jepsen.
 
 ## Usage
 
+Install `gnuplot-nox` and `graphviz` packages at the control node.
+
 Create a `~/ydb-nodes.txt` file that lists your YDB cluster nodes.
 
 Example command for running the test:

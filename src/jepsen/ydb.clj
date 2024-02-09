@@ -238,8 +238,15 @@
       (vec result)
       nil)))
 
-(def ballast
-  (ByteString/copyFromUtf8 (.repeat "x" 1024)))
+(def ballast-obj (atom nil))
+
+(defn ballast-set-size!
+  [size]
+  (reset! ballast-obj (ByteString/copyFromUtf8 (.repeat "x" size))))
+
+(defn ballast
+  []
+  (deref ballast-obj))
 
 (defn execute-list-append
   [tx k v]
@@ -250,7 +257,7 @@
                UPSERT INTO jepsen_test (key, index, value, ballast) VALUES ($key, $next_index, $value, $ballast);"
         params (Params/of "$key" (PrimitiveValue/newInt64 k)
                           "$value" (PrimitiveValue/newInt64 v)
-                          "$ballast" (PrimitiveValue/newBytes ballast))]
+                          "$ballast" (PrimitiveValue/newBytes (ballast)))]
     (execute tx query params)))
 
 (defn apply-mop!
@@ -335,6 +342,7 @@
 (defn ydb-test
   "Tests YDB"
   [opts]
+  (ballast-set-size! (:ballast-size opts))
   (let [workload (append-workload opts)
         db       db/noop
         os       os/noop
@@ -396,6 +404,11 @@
     :default  10
     :parse-fn parse-long
     :validate [pos? "Must be a positive integer"]]
+
+   [nil "--ballast-size NUM" "Number of ballast bytes added to values"
+    :default 1000
+    :parse-fn parse-long
+    :validate [pos? "Must be a positive number."]]
 
    [nil "--max-txn-length NUM" "Maximum number of operations in a transaction."
     :default  4
