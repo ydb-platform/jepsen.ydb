@@ -9,5 +9,6 @@
                  [tech.ydb/ydb-sdk-table "2.1.11"]]
   :main jepsen.ydb
   :jvm-opts ["-Djava.awt.headless=true"
+             ;"-Djava.net.preferIPv6Addresses=true"
              "-server"]
   :repl-options {:init-ns jepsen.ydb})

@@ -7,6 +7,7 @@
             [jepsen.client :as client]
             [jepsen.control :as c]
             [jepsen.db :as db]
+            [jepsen.os :as os]
             [jepsen.generator :as gen]
             [jepsen.nemesis :as nemesis]
             [jepsen.nemesis.combined :as nc]
@@ -28,16 +29,6 @@
            (tech.ydb.table.settings ExecuteSchemeQuerySettings)
            (tech.ydb.table.transaction Transaction$Mode)
            (tech.ydb.table.transaction TxControl)))
-
-(defn db
-  "YDB"
-  [version]
-  (reify db/DB
-    (setup! [_ test node]
-      (info node "installing YDB" version))
-
-    (teardown! [_ test node]
-      (info node "tearing down YDB" version))))
 
 (defn build-transport
   [node db-name]
@@ -345,36 +336,43 @@
   "Tests YDB"
   [opts]
   (let [workload (append-workload opts)
-        db (db "stable-24-1-1")]
-        ;; nemesis  (case (:db opts)
-        ;;             :none nil
-        ;;             (nc/nemesis-package
-        ;;              {:db db
-        ;;               :nodes (:nodes opts)
-        ;;               :faults (:nemesis opts)
-        ;;               :partition {:targets [:one :majority]}
-        ;;               :pause {:targets [:one]}
-        ;;               :kill  {:targets [:one :all]}
-        ;;               :interval (:nemesis-interval opts)}))
+        db       db/noop
+        os       os/noop
+        packages (nc/nemesis-packages
+                  {:db        db
+                   :nodes     (:nodes opts)
+                   :faults    (:nemesis opts)
+                   :partition {:targets [:one]}
+                   :pause     {:targets [:one]}
+                   :kill      {:targets [:one :all]}
+                   :interval  (:nemesis-interval opts)})
+        ; The default nemesis-package will compose all available packages, even
+        ; those that are not enabled. This includes bitflip, which downloads
+        ; and installs an archive from github.com, which doesn't work in
+        ; restricted networks. Filter only those that have a generator.
+        needed-packages (filter
+                         (fn [x] (not (= (:generator x) nil)))
+                         packages)
+        nemesis (nc/compose-packages needed-packages)]
 
     (merge tests/noop-test
            opts
            {:name "ydb"
             :db db
+            :os os
+            :client (:client workload)
+            :nemesis (:nemesis nemesis)
             :checker (checker/compose
-                      {;;  :perf (checker/perf
-                      ;;         {:nemeses (:perf nemesis)})
-                      ;;  :clock (checker/clock-plot)
-                      ;;  :stats (checker/stats)
+                      {:perf (checker/perf
+                              {:nemeses (:perf nemesis)})
+                       :clock (checker/clock-plot)
+                       :stats (checker/stats)
                        :exceptions (checker/unhandled-exceptions)
                        :workload (:checker workload)})
-            :client (:client workload)
-            :nemesis nemesis/noop
             :generator (->> (:generator workload)
                             (gen/stagger (/ (:rate opts)))
-                            (gen/nemesis nil)
+                            (gen/nemesis (:generator nemesis))
                             (gen/time-limit (:time-limit opts)))})))
-
 
 (def special-nemeses
   "A map of special nemesis names to collections of faults"
@@ -415,6 +413,7 @@
     :validate [pos? "Must be a positive number."]]
 
    [nil "--nemesis FAULTS" "A comma-separated list of nemesis faults to enable"
+    :default []
     :parse-fn parse-nemesis-spec
     :validate [(partial every? #{:pause :kill :partition :clock})
                "Faults must be pause, kill, partition, clock, or member, or the special faults all or none."]]
@@ -423,8 +422,6 @@
     :default 5
     :parse-fn read-string
     :validate [pos? "Must be a positive number."]]])
-
-
 
 (defn -main
   "Handles command line arguments."
