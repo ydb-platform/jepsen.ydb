@@ -284,7 +284,14 @@
        (let [status# (.getStatus e#)
              status-code# (.getCode status#)]
          (cond
+           ; Known status codes where operation definitely did not commit
            (= status-code# StatusCode/ABORTED) (assoc ~op :type :fail, :error [:aborted (.toString status#)])
+           (= status-code# StatusCode/OVERLOADED) (assoc ~op :type :fail, :error [:overloaded (.toString status#)])
+           (= status-code# StatusCode/UNAVAILABLE) (assoc ~op :type :fail, :error [:unavailable (.toString status#)])
+           (= status-code# StatusCode/BAD_SESSION) (assoc ~op :type :fail, :error [:bad-session (.toString status#)])
+           (= status-code# StatusCode/SESSION_BUSY) (assoc ~op :type :fail, :error [:session-busy (.toString status#)])
+           (= status-code# StatusCode/CLIENT_RESOURCE_EXHAUSTED) (assoc ~op :type :fail, :error [:client-resource-exhausted (.toString status#)])
+           ; Known status codes where operation may have actually committed
            (= status-code# StatusCode/UNDETERMINED) (assoc ~op :type :info, :error [:undetermined (.toString status#)])
            :else (assoc ~op :type :info, :error [:unexpected-result (.toString status#)]))))))
 
