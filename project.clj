@@ -3,9 +3,11 @@
   :url "https://ydb.tech"
   :license {:name "EPL-2.0 OR GPL-2.0-or-later WITH Classpath-exception-2.0"
             :url "https://www.eclipse.org/legal/epl-2.0/"}
-  :main jepsen.ydb
   :dependencies [[org.clojure/clojure "1.11.1"]
                  [jepsen "0.3.5"]
                  [tech.ydb/ydb-sdk-scheme "2.1.11"]
                  [tech.ydb/ydb-sdk-table "2.1.11"]]
+  :main jepsen.ydb
+  :jvm-opts ["-Djava.awt.headless=true"
+             "-server"]
   :repl-options {:init-ns jepsen.ydb})
