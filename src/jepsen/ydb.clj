@@ -15,6 +15,7 @@
             [jepsen.control.util :as cu])
   (:import (java.time Duration)
            (java.util ArrayList)
+           (com.google.protobuf ByteString)
            (tech.ydb.core StatusCode)
            (tech.ydb.core UnexpectedResultException)
            (tech.ydb.core.grpc GrpcTransport)
@@ -70,6 +71,9 @@
   (id [this]
     "Returns the tranasction id")
 
+  (begin! [this]
+    "Explicitly begin the transaction")
+
   (execute [this query params]
     "Execute a query with the specified params")
 
@@ -79,7 +83,7 @@
   (rollback! [this]
     "Rollback the transaction, doesn't throw on failure, no-op after commit.")
 
-  (commit-next! [this]
+  (auto-commit! [this]
     "Will cause the next execute to implicitly commit the transaction"))
 
 (defn tx-control-for-execute
@@ -91,19 +95,27 @@
 
 (deftype Transaction [session
                       ^:unsynchronized-mutable tx-id
-                      ^:unsynchronized-mutable commit-next]
+                      ^:unsynchronized-mutable auto-commit]
   ITransaction
   (id [this]
     tx-id)
 
+  (begin! [this]
+    (assert (= tx-id nil) "Transaction is already in progress")
+    (let [tx (-> session
+                 (.beginTransaction Transaction$Mode/SERIALIZABLE_READ_WRITE (BeginTxSettings.))
+                 .join
+                 .getValue)]
+      (set! tx-id (.getId tx))))
+
   (execute [this query params]
-    ;; (info "executing tx query:" query "in tx" (id this) (if commit-next "with auto commit" nil))
-    (let [tx-control (tx-control-for-execute tx-id commit-next)
+    ;; (info "executing tx query:" query "in tx" (id this) (if auto-commit "with auto commit" nil))
+    (let [tx-control (tx-control-for-execute tx-id auto-commit)
           result (-> session
                      (.executeDataQuery query tx-control params)
                      .join
                      .getValue)]
-      (if commit-next
+      (if auto-commit
         ; Clear tx-id when we successfully commit implicitly
         (set! tx-id nil)
         ; Remember tx-id when we start a new transaction
@@ -126,16 +138,16 @@
           .join)
       (set! tx-id nil)))
 
-  (commit-next! [this]
-    (set! commit-next true)))
+  (auto-commit! [this]
+    (set! auto-commit true)))
 
-(defn begin-transaction
+(defn open-transaction
   [session]
   (Transaction. session nil false))
 
 (defmacro with-transaction
   [[tx-name session] & body]
-  `(let [~tx-name (begin-transaction ~session)]
+  `(let [~tx-name (open-transaction ~session)]
     ;;  (info "opened transaction" (.getId ~tx-name))
      (try
        (let [r# (do ~@body)]
@@ -159,13 +171,17 @@
   [table-client]
   (info "creating initial tables")
   (with-session [session table-client]
-    (execute-scheme-query session "CREATE TABLE jepsen_test (key Int64, index Int64, value Int64, PRIMARY KEY (key, index))
+    (execute-scheme-query session "CREATE TABLE jepsen_test (
+                                       key Int64,
+                                       index Int64,
+                                       value Int64,
+                                       ballast string,
+                                       PRIMARY KEY (key, index))
                                    WITH (AUTO_PARTITIONING_BY_SIZE = ENABLED,
-                                   AUTO_PARTITIONING_BY_LOAD = ENABLED,
-                                   AUTO_PARTITIONING_PARTITION_SIZE_MB = 10,
-                                   PARTITION_AT_KEYS = (10, 20, 30, 40, 50, 60, 70, 80, 90, 100,
-                                   110, 120, 130, 140, 150, 160, 170, 180, 190, 200,
-                                   210, 220, 230, 240, 250, 260, 270, 280, 290, 300));")))
+                                         AUTO_PARTITIONING_BY_LOAD = ENABLED,
+                                         AUTO_PARTITIONING_PARTITION_SIZE_MB = 10,
+                                         PARTITION_AT_KEYS = (
+                                             11, 21, 31, 41, 51, 61, 71, 81, 91));")))
 
 (defn drop-initial-tables
   [table-client]
@@ -231,14 +247,19 @@
       (vec result)
       nil)))
 
+(def ballast
+  (ByteString/copyFromUtf8 (.repeat "x" 1024)))
+
 (defn execute-list-append
   [tx k v]
   (let [query "DECLARE $key AS Int64;
                DECLARE $value AS Int64;
+               DECLARE $ballast AS Bytes;
                $next_index = (SELECT COALESCE(MAX(index) + 1, 0) FROM jepsen_test WHERE key = $key);
-               UPSERT INTO jepsen_test (key, index, value) VALUES ($key, $next_index, $value);"
+               UPSERT INTO jepsen_test (key, index, value, ballast) VALUES ($key, $next_index, $value, $ballast);"
         params (Params/of "$key" (PrimitiveValue/newInt64 k)
-                          "$value" (PrimitiveValue/newInt64 v))]
+                          "$value" (PrimitiveValue/newInt64 v)
+                          "$ballast" (PrimitiveValue/newBytes ballast))]
     (execute tx query params)))
 
 (defn apply-mop!
@@ -252,7 +273,7 @@
 (defn apply-mop-with-auto-commit-last!
   [tx mop index count]
   (when (= index (dec count))
-    (commit-next! tx))
+    (auto-commit! tx))
   (apply-mop! tx mop))
 
 (defmacro with-errors
@@ -262,9 +283,10 @@
      (catch UnexpectedResultException e#
        (let [status# (.getStatus e#)
              status-code# (.getCode status#)]
-         (if (= status-code# StatusCode/ABORTED)
-           (assoc ~op :type :fail, :error [:aborted (.toString status#)])
-           (assoc ~op :type :info, :error [:unexpected-result (.toString status#)]))))))
+         (cond
+           (= status-code# StatusCode/ABORTED) (assoc ~op :type :fail, :error [:aborted (.toString status#)])
+           (= status-code# StatusCode/UNDETERMINED) (assoc ~op :type :info, :error [:undetermined (.toString status#)])
+           :else (assoc ~op :type :info, :error [:unexpected-result (.toString status#)]))))))
 
 (defmacro once-per-cluster
   [atomic-bool & body]
