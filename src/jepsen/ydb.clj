@@ -1,5 +1,5 @@
 (ns jepsen.ydb
-  (:require [clojure.tools.logging :refer :all]
+  (:require [clojure.tools.logging :refer [info]]
             [clojure.string :as str]
             [jepsen.checker :as checker]
             [jepsen.checker.timeline :as timeline]
@@ -13,7 +13,8 @@
             [jepsen.nemesis.combined :as nc]
             [jepsen.tests :as tests]
             [jepsen.tests.cycle.append :as append]
-            [jepsen.control.util :as cu])
+            [jepsen.control.util :as cu]
+            [jepsen.ydb.serializable :as serializable])
   (:import (java.time Duration)
            (java.util ArrayList)
            (com.google.protobuf ByteString)
@@ -50,6 +51,7 @@
       .getValue))
 
 (defmacro with-session
+  {:clj-kondo/lint-as 'clojure.core/let}
   [[session-name table-client] & body]
   `(with-open [~session-name (open-session ~table-client)]
     ;;  (info "opened session" (.getId ~session-name))
@@ -137,6 +139,7 @@
   (Transaction. session nil false))
 
 (defmacro with-transaction
+  {:clj-kondo/lint-as 'clojure.core/let}
   [[tx-name session] & body]
   `(let [~tx-name (open-transaction ~session)]
     ;;  (info "opened transaction" (.getId ~tx-name))
@@ -172,7 +175,9 @@
                                          AUTO_PARTITIONING_BY_LOAD = ENABLED,
                                          AUTO_PARTITIONING_PARTITION_SIZE_MB = 10,
                                          PARTITION_AT_KEYS = (
-                                             11, 21, 31, 41, 51, 61, 71, 81, 91));")))
+                                             11, 21, 31, 41, 51, 61, 71, 81, 91, 101,
+                                             111, 121, 131, 141, 151, 161, 171, 181, 191, 201,
+                                             211, 221, 231, 241, 251, 261, 271, 281, 291, 301));")))
 
 (defn drop-initial-tables
   [table-client]
@@ -332,11 +337,11 @@
 
 (defn append-workload
   [opts]
-  (-> (append/test (assoc (select-keys opts [:key-count
-                                             :min-txn-length
-                                             :max-txn-length
-                                             :max-writes-per-key])
-                          :consistency-models [:strict-serializable]))
+  (-> (serializable/append-test (assoc (select-keys opts [:key-count
+                                                   :min-txn-length
+                                                   :max-txn-length
+                                                   :max-writes-per-key])
+                                :consistency-models [:serializable]))
       (assoc :client (Client. (:db-name opts) nil nil (atom false)))))
 
 (defn ydb-test
