@@ -9,7 +9,9 @@
             [elle.rels :as rels :refer [ww wr rw process realtime]]
             [dom-top.core :refer [loopr]])
   (:import (io.lacuna.bifurcan ISet
-                               Set)
+                               Set
+                               IMap
+                               Map)
            (jepsen.history Op)
            (elle.core RealtimeExplainer)))
 
@@ -24,12 +26,12 @@
   (apply hash-set (map mop-key (:value op))))
 
 (defn link-per-key-oks
-  [alloks g op op']
+  [^IMap alloks g op op']
   (reduce
    ; Iterate for each affected key k in op
    ; When a given key has oks set we link them to completion op'
    (fn [g k]
-     (let [oks (get alloks k)]
+     (let [oks (.get alloks k nil)]
        (if (nil? oks)
          g
          (g/link-all-to g oks op' realtime))))
@@ -47,23 +49,23 @@
         oks))))
 
 (defn add-per-key-oks
-  [alloks g op]
+  [^IMap alloks g op]
   (reduce
    ; Iterate for each affected key k in op
    ; Adds op to oks buffer for each key, removing implied ops
    (fn [alloks k]
-     (let [oks (get alloks k)
+     (let [oks (.get alloks k nil)
            oks (oks-without-implied oks g op)
            oks (.add oks op)]
-       (assoc alloks k oks)))
+       (.put alloks k oks)))
    alloks (op-keys op)))
 
 (defn ydb-realtime-graph
   "A modification of realtime-graph from elle, where only per-key realtime
    edges are added. This corresponds to per-key linearizability."
   [history]
-  (loopr [alloks {} ; Our buffer of completed ops for each key
-          g      (b/linear (g/op-digraph))] ; Our order graph
+  (loopr [^IMap alloks (.linear (Map.)) ; Our buffer of completed ops for each key
+                g      (b/linear (g/op-digraph))] ; Our order graph
          [op history :via :reduce]
          (case (:type op)
            ; A new operation begins! Link every completed op to this one's
