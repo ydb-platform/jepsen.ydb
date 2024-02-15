@@ -7,6 +7,7 @@
                  [jepsen "0.3.5"]
                  [tech.ydb/ydb-sdk-scheme "2.1.11"]
                  [tech.ydb/ydb-sdk-table "2.1.11"]]
+  :profiles {:uberjar {:aot :all}}
   :main jepsen.ydb
   :jvm-opts ["-Djava.awt.headless=true"
              ;"-Djava.net.preferIPv6Addresses=true"

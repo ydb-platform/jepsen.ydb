@@ -1,4 +1,5 @@
 (ns jepsen.ydb
+  (:gen-class)
   (:require [clojure.tools.logging :refer [info]]
             [clojure.string :as str]
             [jepsen.checker :as checker]
