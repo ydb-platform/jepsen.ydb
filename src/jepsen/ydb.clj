@@ -32,8 +32,8 @@
            (tech.ydb.table.transaction TxControl)))
 
 (defn build-transport
-  [node db-name]
-  (let [conn-string (str "grpc://" node ":2135?database=" db-name)]
+  [test node]
+  (let [conn-string (str "grpc://" node ":2135?database=" (:db-name test))]
     ;; (info "connecting to" conn-string)
     (-> (GrpcTransport/forConnectionString conn-string)
         .build)))
@@ -161,37 +161,39 @@
       .join
       .expectSuccess))
 
-(defn create-initial-tables
-  [table-client]
-  (info "creating initial tables")
-  (with-session [session table-client]
-    (execute-scheme-query session "CREATE TABLE jepsen_test (
-                                       key Int64,
-                                       index Int64,
-                                       value Int64,
-                                       ballast string,
-                                       PRIMARY KEY (key, index))
-                                   WITH (AUTO_PARTITIONING_BY_SIZE = ENABLED,
-                                         AUTO_PARTITIONING_BY_LOAD = ENABLED,
-                                         AUTO_PARTITIONING_PARTITION_SIZE_MB = 10,
-                                         PARTITION_AT_KEYS = (
-                                             11, 21, 31, 41, 51, 61, 71, 81, 91, 101,
-                                             111, 121, 131, 141, 151, 161, 171, 181, 191, 201,
-                                             211, 221, 231, 241, 251, 261, 271, 281, 291, 301));")))
-
 (defn drop-initial-tables
-  [table-client]
+  [test table-client]
   (info "dropping initial tables")
   (with-session [session table-client]
-    (execute-scheme-query session "DROP TABLE IF EXISTS jepsen_test;")))
+    (let [query (str "DROP TABLE IF EXISTS `" (:db-table test) "`;")]
+      (execute-scheme-query session query))))
+
+(defn create-initial-tables
+  [test table-client]
+  (info "creating initial tables")
+  (with-session [session table-client]
+    (let [query (str "CREATE TABLE `" (:db-table test) "` (
+                          key Int64,
+                          index Int64,
+                          value Int64,
+                          ballast string,
+                          PRIMARY KEY (key, index))
+                      WITH (AUTO_PARTITIONING_BY_SIZE = ENABLED,
+                            AUTO_PARTITIONING_BY_LOAD = ENABLED,
+                            AUTO_PARTITIONING_PARTITION_SIZE_MB = 10,
+                            PARTITION_AT_KEYS = (
+                                11, 21, 31, 41, 51, 61, 71, 81, 91, 101,
+                                111, 121, 131, 141, 151, 161, 171, 181, 191, 201,
+                                211, 221, 231, 241, 251, 261, 271, 281, 291, 301));")]
+      (execute-scheme-query session query))))
 
 (defn execute-list-read
   "Executes a list read for the given key k. Works only when the list has at most 1k values."
-  [tx k]
-  (let [query "DECLARE $key AS Int64;
-               SELECT index, value FROM jepsen_test
-               WHERE key = $key
-               ORDER BY index;"
+  [test tx k]
+  (let [query (str "DECLARE $key AS Int64;
+                    SELECT index, value FROM `" (:db-table test) "`
+                    WHERE key = $key
+                    ORDER BY index;")
         params (Params/of "$key" (PrimitiveValue/newInt64 k))
         query-result (execute tx query params)
         rs (. query-result getResultSet 0)
@@ -207,42 +209,6 @@
       (vec result)
       nil)))
 
-(defn execute-list-read-chunk
-  [tx k start count]
-  (let [query "DECLARE $key AS Int64;
-               DECLARE $start AS Int64;
-               DECLARE $end AS Int64;
-               SELECT index, value FROM jepsen_test
-               WHERE key = $key AND index >= $start AND index <= $end
-               ORDER BY index;"
-        params (Params/of "$key" (PrimitiveValue/newInt64 k)
-                          "$start" (PrimitiveValue/newInt64 start)
-                          "$end" (PrimitiveValue/newInt64 (+ start (- count 1))))
-        result (execute tx query params)
-        rs (. result getResultSet 0)
-        l (ArrayList.)]
-    (while (. rs next)
-      (let [index (-> rs (.getColumn 0) .getInt64)
-            value (-> rs (.getColumn 1) .getInt64)
-            expectedIndex (+ start (.size l))]
-        (assert (= index expectedIndex) "List indexes are not ordered correctly")
-        (. l add value)))
-    l))
-
-(defn execute-list-read-unlimited
-  "Executes a list read for the given key k. Works when the list has more than 1k values."
-  [tx k]
-  (let [result (ArrayList.)]
-    (loop []
-      (let [l (execute-list-read-chunk tx k (.size result) 1000)]
-        (. result addAll l)
-        (if (< (.size l) 1000)
-          result
-          (recur))))
-    (if (> (.size result) 0)
-      (vec result)
-      nil)))
-
 (def ballast-obj (atom nil))
 
 (defn ballast-set-size!
@@ -254,30 +220,30 @@
   (deref ballast-obj))
 
 (defn execute-list-append
-  [tx k v]
-  (let [query "DECLARE $key AS Int64;
-               DECLARE $value AS Int64;
-               DECLARE $ballast AS Bytes;
-               $next_index = (SELECT COALESCE(MAX(index) + 1, 0) FROM jepsen_test WHERE key = $key);
-               UPSERT INTO jepsen_test (key, index, value, ballast) VALUES ($key, $next_index, $value, $ballast);"
+  [test tx k v]
+  (let [query (str "DECLARE $key AS Int64;
+                    DECLARE $value AS Int64;
+                    DECLARE $ballast AS Bytes;
+                    $next_index = (SELECT COALESCE(MAX(index) + 1, 0) FROM `" (:db-table test) "` WHERE key = $key);
+                    UPSERT INTO `" (:db-table test) "` (key, index, value, ballast) VALUES ($key, $next_index, $value, $ballast);")
         params (Params/of "$key" (PrimitiveValue/newInt64 k)
                           "$value" (PrimitiveValue/newInt64 v)
                           "$ballast" (PrimitiveValue/newBytes (ballast)))]
     (execute tx query params)))
 
 (defn apply-mop!
-  [tx [f k v :as mop]]
+  [test tx [f k v :as mop]]
   (case f
-    :r [f k (execute-list-read tx k)]
+    :r [f k (execute-list-read test tx k)]
     :append (do
-              (execute-list-append tx k v)
+              (execute-list-append test tx k v)
               mop)))
 
 (defn apply-mop-with-auto-commit-last!
-  [tx mop index count]
+  [test tx mop index count]
   (when (= index (dec count))
     (auto-commit! tx))
-  (apply-mop! tx mop))
+  (apply-mop! test tx mop))
 
 (defmacro with-errors
   [op & body]
@@ -303,18 +269,18 @@
   `(locking ~atomic-bool
      (when (compare-and-set! ~atomic-bool false true) ~@body)))
 
-(defrecord Client [db-name transport table-client setup?]
+(defrecord Client [transport table-client setup?]
   client/Client
   (open! [this test node]
-    (let [transport (build-transport node db-name)
+    (let [transport (build-transport test node)
           table-client (build-table-client transport)]
       (assoc this :transport transport :table-client table-client)))
 
   (setup! [this test]
     (once-per-cluster
      setup?
-     (drop-initial-tables table-client)
-     (create-initial-tables table-client)))
+     (drop-initial-tables test table-client)
+     (create-initial-tables test table-client)))
 
   (invoke! [_ test op]
     ; TODO: handle known errors!
@@ -323,7 +289,7 @@
       (with-session [session table-client]
         (with-transaction [tx session]
           (let [txn (:value op)
-                txn' (mapv (partial apply-mop-with-auto-commit-last! tx)
+                txn' (mapv (partial apply-mop-with-auto-commit-last! test tx)
                            txn
                            (iterate inc 0)
                            (repeat (count txn)))]
@@ -338,11 +304,11 @@
 (defn append-workload
   [opts]
   (-> (serializable/append-test (assoc (select-keys opts [:key-count
-                                                   :min-txn-length
-                                                   :max-txn-length
-                                                   :max-writes-per-key])
-                                :consistency-models [:serializable]))
-      (assoc :client (Client. (:db-name opts) nil nil (atom false)))))
+                                                          :min-txn-length
+                                                          :max-txn-length
+                                                          :max-writes-per-key])
+                                       :consistency-models [:serializable]))
+      (assoc :client (Client. nil nil (atom false)))))
 
 (defn ydb-test
   "Tests YDB"
@@ -404,6 +370,9 @@
   "Command line options"
   [[nil "--db-name DBNAME" "YDB database name."
     :default "/local"]
+
+   [nil "--db-table NAME" "YDB table name to use for testing."
+    :default "jepsen_test"]
 
    [nil "--key-count NUM" "Number of keys in active rotation."
     :default  10
