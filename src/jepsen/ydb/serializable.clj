@@ -65,7 +65,7 @@
    edges are added. This corresponds to per-key linearizability."
   [history]
   (loopr [^IMap alloks (.linear (Map.)) ; Our buffer of completed ops for each key
-                g      (b/linear (g/op-digraph))] ; Our order graph
+          g (b/linear (g/op-digraph))] ; Our order graph
          [op history :via :reduce]
          (case (:type op)
            ; A new operation begins! Link every completed op to this one's
@@ -94,35 +94,56 @@
          {:graph     (b/forked g)
           :explainer (RealtimeExplainer. history)}))
 
-(defn ydb-check-opts
-  "Modified check opts for YDB consistency model."
+(defmacro with-ydb-realtime-graph
+  [& body]
+  `(with-redefs [elle/realtime-graph ydb-realtime-graph]
+     (do ~@body)))
+
+(defn replace-ydb-serializable-model
+  "Searches for :ydb-serializable consistency model and replaces it with :strict-serializable when found.
+   Returns (opts replaced) tuple"
   [opts]
-  (let [requested-models (:consistency-models opts)
-        ; YDB is not strict serializable, but we use modified realtime graph
-        ; to relax some realtime requirements and then check as if it was
-        ; strict serializable.
-        checked-models (cons :strict-serializable requested-models)]
-    (assoc opts :consistency-models checked-models)))
+  (let [models (:consistency-models opts)
+        models-set (apply hash-set models)]
+    (if (contains? models-set :ydb-serializable)
+      (do
+        (when (contains? models-set :strict-serializable)
+          (throw (RuntimeException. ":ydb-serializable cannot be mixed with :strict-serializable")))
+        (let [models (mapv (fn [model]
+                             (if (= model :ydb-serializable)
+                               :strict-serializable
+                               model)) models)]
+          (list (assoc opts :consistency-models models) true)))
+      (list opts false))))
+
+(def append-check-orig a/check)
 
 (defn append-check
-  "Checks history using YDB consistency model."
+  "Modified append/check with support for :ydb-serializable consistency model."
   ([history]
-   (append-check {} history))
+   (append-check-orig history))
   ([opts history]
-   (with-redefs [elle/realtime-graph ydb-realtime-graph]
-     (a/check (ydb-check-opts opts) history))))
+   (let [[opts replaced] (replace-ydb-serializable-model opts)]
+     (if replaced
+       (with-ydb-realtime-graph
+         (append-check-orig opts history))
+       (append-check-orig opts history)))))
 
-(defn ydb-checker
-  "Wraps an existing jepsen checker with a modified YDB realtime graph."
+(defmacro with-ydb-serializable
+  [& body]
+  `(with-redefs [a/check append-check]
+     (do ~@body)))
+
+(defn wrap-checker
+  "Wraps an existing jepsen checker with support for :ydb-serializable consistency model."
   [wrapped]
   (reify checker/Checker
     (check [this test history checker-opts]
-      (with-redefs [elle/realtime-graph ydb-realtime-graph]
+      (with-ydb-serializable
         (checker/check wrapped test history checker-opts)))))
 
 (defn append-test
-  "A partial test for YDB consistency model."
+  "A partial append test with support for :ydb-serializable consistency model."
   [opts]
-  (let [opts (ydb-check-opts opts)
-        test (append/test opts)]
-    (assoc test :checker (ydb-checker (:checker test)))))
+  (let [test (append/test opts)]
+    (assoc test :checker (wrap-checker (:checker test)))))

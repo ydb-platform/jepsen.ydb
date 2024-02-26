@@ -339,7 +339,7 @@
                                                           :min-txn-length
                                                           :max-txn-length
                                                           :max-writes-per-key])
-                                       :consistency-models [:serializable]))
+                                       :consistency-models [:ydb-serializable]))
       (assoc :client (Client. nil nil (atom false)))))
 
 (defn ydb-test
