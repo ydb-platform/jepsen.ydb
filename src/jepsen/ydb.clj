@@ -2,7 +2,7 @@
   (:gen-class)
   (:require [clojure.tools.logging :refer [info]]
             [clojure.string :as str]
-            [clojure.edn :as edn]
+            [clojure.data.json :as json]
             [jepsen.checker :as checker]
             [jepsen.checker.timeline :as timeline]
             [jepsen.cli :as cli]
@@ -94,7 +94,8 @@
 (defn try-parse-debug-info
   [debug-info]
   (try
-    (edn/read-string debug-info)
+    (json/read-str debug-info
+                   :key-fn #(keyword (.replace % \_ \-)))
     (catch Exception e debug-info)))
 
 (deftype Transaction [session
