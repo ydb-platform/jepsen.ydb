@@ -1,4 +1,4 @@
-(ns jepsen.ydb.cli-clean
+(ns jepsen.ydb.cli.clean
   (:require [clojure.tools.logging :refer [info]]
             [jepsen.cli :as cli]
             [jepsen.store :as store]
@@ -23,20 +23,25 @@
        (sort-by :start-time)
        reverse))
 
+(defn remove?
+  [t]
+  (let [valid (:valid? (store/load-results (:name t) (:time t)) :incomplete)]
+    (cond
+      (= valid true) "valid"
+      (= valid :incomplete) "incomplete"
+      :else nil)))
+
 (defn clean-valid
   [{:keys [options]}]
   (let [tests (sorted-tests)
         tests (drop (:keep options) tests)]
     (doall
      (for [t tests]
-       (do
-         (let [valid (:valid? (store/load-results (:name t) (:time t)) :incomplete)]
-           (if (or (= valid true)
-                   (= valid :incomplete))
-             (do
-               (info "Removing valid test" (:name t) (:time t))
-               (store/delete! (:name t) (:time t)))
-             (info "Skipping test" (:name t) (:time t)))))))))
+       (if-let [reason (remove? t)]
+         (do
+           (info "Removing" reason "test" (:name t) (:time t))
+           (store/delete! (:name t) (:time t)))
+         (info "Skipping test" (:name t) (:time t)))))))
 
 (defn clean-valid-cmd
   "A clean-valid command"

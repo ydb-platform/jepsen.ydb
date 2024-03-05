@@ -15,7 +15,7 @@
             [jepsen.tests :as tests]
             [jepsen.tests.cycle.append :as append]
             [jepsen.control.util :as cu]
-            [jepsen.ydb.cli-clean :as cli-clean]
+            [jepsen.ydb.cli.clean :refer [clean-valid-cmd]]
             [jepsen.ydb.conn :as conn]
             [jepsen.ydb.debug-info :as debug-info]
             [jepsen.ydb.serializable :as ydb-serializable])
@@ -268,5 +268,5 @@
   (cli/run! (merge (cli/single-test-cmd {:test-fn ydb-test
                                          :opt-spec cli-opts})
                    (cli/serve-cmd)
-                   (cli-clean/clean-valid-cmd))
+                   (clean-valid-cmd))
             args))
