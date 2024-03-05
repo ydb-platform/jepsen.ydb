@@ -2,7 +2,6 @@
   (:gen-class)
   (:require [clojure.tools.logging :refer [info]]
             [clojure.string :as str]
-            [clojure.data.json :as json]
             [jepsen.checker :as checker]
             [jepsen.checker.timeline :as timeline]
             [jepsen.cli :as cli]
@@ -17,172 +16,25 @@
             [jepsen.tests.cycle.append :as append]
             [jepsen.control.util :as cu]
             [jepsen.ydb.cli-clean :as cli-clean]
+            [jepsen.ydb.conn :as conn]
             [jepsen.ydb.debug-info :as debug-info]
-            [jepsen.ydb.serializable :as serializable])
-  (:import (java.time Duration)
-           (java.util ArrayList)
+            [jepsen.ydb.serializable :as ydb-serializable])
+  (:import (java.util ArrayList)
            (com.google.protobuf ByteString)
-           (tech.ydb.core StatusCode)
-           (tech.ydb.core UnexpectedResultException)
-           (tech.ydb.core.grpc GrpcTransport)
-           (tech.ydb.table TableClient)
            (tech.ydb.table.query Params)
-           (tech.ydb.table.values PrimitiveValue)
-           (tech.ydb.table.settings BeginTxSettings)
-           (tech.ydb.table.settings CommitTxSettings)
-           (tech.ydb.table.settings RollbackTxSettings)
-           (tech.ydb.table.settings ExecuteSchemeQuerySettings)
-           (tech.ydb.table.transaction Transaction$Mode)
-           (tech.ydb.table.transaction TxControl)))
-
-(defn build-transport
-  [test node]
-  (let [conn-string (str "grpc://" node ":2135?database=" (:db-name test))]
-    ;; (info "connecting to" conn-string)
-    (-> (GrpcTransport/forConnectionString conn-string)
-        .build)))
-
-(defn build-table-client
-  [transport]
-  (-> (TableClient/newClient transport)
-      .build))
-
-(defn open-session
-  [table-client]
-  (-> table-client
-      (.createSession (Duration/ofSeconds 5))
-      .join
-      .getValue))
-
-(defmacro with-session
-  {:clj-kondo/lint-as 'clojure.core/let}
-  [[session-name table-client] & body]
-  `(with-open [~session-name (open-session ~table-client)]
-    ;;  (info "opened session" (.getId ~session-name))
-     (let [r# (do ~@body)]
-       r#)))
-
-(defprotocol ITransaction
-  "Represents a serializable read-write transaction"
-
-  (id [this]
-    "Returns the tranasction id")
-
-  (begin! [this]
-    "Explicitly begin the transaction")
-
-  (execute [this query params]
-    "Execute a query with the specified params")
-
-  (commit! [this]
-    "Commit the transaction, may throw an error when it fails.")
-
-  (rollback! [this]
-    "Rollback the transaction, doesn't throw on failure, no-op after commit.")
-
-  (auto-commit! [this]
-    "Will cause the next execute to implicitly commit the transaction"))
-
-(defn tx-control-for-execute
-  [tx-id commit]
-  (-> (if (= tx-id nil)
-        (TxControl/serializableRw)
-        (TxControl/id tx-id))
-      (.setCommitTx commit)))
-
-(deftype Transaction [session
-                      ^:unsynchronized-mutable tx-id
-                      ^:unsynchronized-mutable auto-commit]
-  ITransaction
-  (id [this]
-    tx-id)
-
-  (begin! [this]
-    (assert (= tx-id nil) "Transaction is already in progress")
-    (let [tx (-> session
-                 (.beginTransaction Transaction$Mode/SERIALIZABLE_READ_WRITE (BeginTxSettings.))
-                 .join
-                 .getValue)]
-      (set! tx-id (.getId tx))))
-
-  (execute [this query params]
-    ;; (info "executing tx query:" query "in tx" (id this) (if auto-commit "with auto commit" nil))
-    (let [tx-control (tx-control-for-execute tx-id auto-commit)
-          result (-> session
-                     (.executeDataQuery query tx-control params)
-                     .join
-                     .getValue)]
-      (if auto-commit
-        ; Clear tx-id when we successfully commit implicitly
-        (set! tx-id nil)
-        ; Remember tx-id when we start a new transaction
-        (when (= tx-id nil)
-          (set! tx-id (.getTxId result))))
-      (when (-> result .hasQueryStats)
-        ; FIXME: this is temporary until debug info is passed using dedicated fields (need new java sdk for that)
-        (let [ast (-> result .getQueryStats .getQueryAst)]
-          (when (. ast startsWith "debug-info:")
-            (let [chunk (. ast substring 11)
-                  chunk (debug-info/try-parse-debug-info chunk)]
-              (debug-info/add-debug-info chunk)))))
-      result))
-
-  (commit! [this]
-    (when (not (= tx-id nil))
-      (-> session
-          (.commitTransaction tx-id (CommitTxSettings.))
-          .join
-          .expectSuccess)
-      (set! tx-id nil)))
-
-  (rollback! [this]
-    (when (not (= tx-id nil))
-      (-> session
-          (.rollbackTransaction tx-id (RollbackTxSettings.))
-          .join)
-      (set! tx-id nil)))
-
-  (auto-commit! [this]
-    (set! auto-commit true)))
-
-(defn open-transaction
-  [session]
-  (Transaction. session nil false))
-
-(defmacro with-transaction
-  {:clj-kondo/lint-as 'clojure.core/let}
-  [[tx-name session] & body]
-  `(let [~tx-name (open-transaction ~session)]
-    ;;  (info "opened transaction" (.getId ~tx-name))
-     (try
-       (let [r# (do ~@body)]
-        ;;  (info "commiting transaction" (.getId ~tx-name))
-         (commit! ~tx-name)
-         r#)
-       (catch Exception e#
-        ;;  (info "rolling back transaction" (.getId ~tx-name))
-         (rollback! ~tx-name)
-         (throw e#)))))
-
-(defn execute-scheme-query
-  [session query]
-  (info "executing scheme query:" query)
-  (-> session
-      (.executeSchemeQuery query (ExecuteSchemeQuerySettings.))
-      .join
-      .expectSuccess))
+           (tech.ydb.table.values PrimitiveValue)))
 
 (defn drop-initial-tables
   [test table-client]
   (info "dropping initial tables")
-  (with-session [session table-client]
+  (conn/with-session [session table-client]
     (let [query (str "DROP TABLE IF EXISTS `" (:db-table test) "`;")]
-      (execute-scheme-query session query))))
+      (conn/execute-scheme! session query))))
 
 (defn create-initial-tables
   [test table-client]
   (info "creating initial tables")
-  (with-session [session table-client]
+  (conn/with-session [session table-client]
     (let [query (str "CREATE TABLE `" (:db-table test) "` (
                           key Int64,
                           index Int64,
@@ -196,7 +48,7 @@
                                 11, 21, 31, 41, 51, 61, 71, 81, 91, 101,
                                 111, 121, 131, 141, 151, 161, 171, 181, 191, 201,
                                 211, 221, 231, 241, 251, 261, 271, 281, 291, 301));")]
-      (execute-scheme-query session query))))
+      (conn/execute-scheme! session query))))
 
 (defn execute-list-read
   "Executes a list read for the given key k. Works only when the list has at most 1k values."
@@ -206,7 +58,7 @@
                     WHERE key = $key
                     ORDER BY index;")
         params (Params/of "$key" (PrimitiveValue/newInt64 k))
-        query-result (execute tx query params)
+        query-result (conn/execute! tx query params)
         rs (. query-result getResultSet 0)
         result (ArrayList.)]
     (assert (not (.isTruncated rs)) "List read result was truncated")
@@ -240,7 +92,7 @@
         params (Params/of "$key" (PrimitiveValue/newInt64 k)
                           "$value" (PrimitiveValue/newInt64 v)
                           "$ballast" (PrimitiveValue/newBytes (ballast)))]
-    (execute tx query params)))
+    (conn/execute! tx query params)))
 
 (defn apply-mop!
   [test tx [f k v :as mop]]
@@ -253,27 +105,8 @@
 (defn apply-mop-with-auto-commit-last!
   [test tx mop index count]
   (when (= index (dec count))
-    (auto-commit! tx))
+    (conn/auto-commit! tx))
   (apply-mop! test tx mop))
-
-(defmacro with-errors
-  [op & body]
-  `(try
-     ~@body
-     (catch UnexpectedResultException e#
-       (let [status# (.getStatus e#)
-             status-code# (.getCode status#)]
-         (cond
-           ; Known status codes where operation definitely did not commit
-           (= status-code# StatusCode/ABORTED) (assoc ~op :type :fail, :error [:aborted (.toString status#)])
-           (= status-code# StatusCode/OVERLOADED) (assoc ~op :type :fail, :error [:overloaded (.toString status#)])
-           (= status-code# StatusCode/UNAVAILABLE) (assoc ~op :type :fail, :error [:unavailable (.toString status#)])
-           (= status-code# StatusCode/BAD_SESSION) (assoc ~op :type :fail, :error [:bad-session (.toString status#)])
-           (= status-code# StatusCode/SESSION_BUSY) (assoc ~op :type :fail, :error [:session-busy (.toString status#)])
-           (= status-code# StatusCode/CLIENT_RESOURCE_EXHAUSTED) (assoc ~op :type :fail, :error [:client-resource-exhausted (.toString status#)])
-           ; Known status codes where operation may have actually committed
-           (= status-code# StatusCode/UNDETERMINED) (assoc ~op :type :info, :error [:undetermined (.toString status#)])
-           :else (assoc ~op :type :info, :error [:unexpected-result (.toString status#)]))))))
 
 (defmacro once-per-cluster
   [atomic-bool & body]
@@ -283,8 +116,8 @@
 (defrecord Client [transport table-client setup?]
   client/Client
   (open! [this test node]
-    (let [transport (build-transport test node)
-          table-client (build-table-client transport)]
+    (let [transport (conn/open-transport test node)
+          table-client (conn/open-table-client transport)]
       (assoc this :transport transport :table-client table-client)))
 
   (setup! [this test]
@@ -297,9 +130,9 @@
     ; TODO: handle known errors!
     ;; (info "processing op:" op)
     (debug-info/with-debug-info
-      (with-errors op
-        (with-session [session table-client]
-          (with-transaction [tx session]
+      (conn/with-errors op
+        (conn/with-session [session table-client]
+          (conn/with-transaction [tx session]
             (let [txn (:value op)
                   txn' (mapv (partial apply-mop-with-auto-commit-last! test tx)
                              txn
@@ -316,11 +149,12 @@
 
 (defn append-workload
   [opts]
-  (-> (serializable/append-test (assoc (select-keys opts [:key-count
-                                                          :min-txn-length
-                                                          :max-txn-length
-                                                          :max-writes-per-key])
-                                       :consistency-models [:ydb-serializable]))
+  (-> (ydb-serializable/wrap-test
+       (append/test (assoc (select-keys opts [:key-count
+                                              :min-txn-length
+                                              :max-txn-length
+                                              :max-writes-per-key])
+                           :consistency-models [:ydb-serializable])))
       (assoc :client (Client. nil nil (atom false)))))
 
 (defn ydb-test
@@ -383,6 +217,11 @@
   "Command line options"
   [[nil "--db-name DBNAME" "YDB database name."
     :default "/local"]
+
+   [nil "--db-port NUM" "YDB database port."
+    :default 2135
+    :parse-fn parse-long
+    :validate [pos? "Must be a positive integer"]]
 
    [nil "--db-table NAME" "YDB table name to use for testing."
     :default "jepsen_test"]

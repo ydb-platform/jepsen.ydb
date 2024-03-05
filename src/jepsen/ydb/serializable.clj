@@ -142,8 +142,7 @@
       (with-ydb-serializable
         (checker/check wrapped test history checker-opts)))))
 
-(defn append-test
-  "A partial append test with support for :ydb-serializable consistency model."
-  [opts]
-  (let [test (append/test opts)]
-    (assoc test :checker (wrap-checker (:checker test)))))
+(defn wrap-test
+  "Wraps a jepsen test with support for :ydb-serializable consistency model."
+  [test]
+  (assoc test :checker (wrap-checker (:checker test))))

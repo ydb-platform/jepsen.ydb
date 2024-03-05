@@ -1,4 +1,4 @@
-(ns jepsen.ydb-test
+(ns jepsen.ydb.serializable-test
   (:require [clojure.test :refer :all]
             [elle.list-append :as a]
             [jepsen.history :as h]
