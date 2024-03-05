@@ -17,6 +17,7 @@
             [jepsen.tests.cycle.append :as append]
             [jepsen.control.util :as cu]
             [jepsen.ydb.cli-clean :as cli-clean]
+            [jepsen.ydb.debug-info :as debug-info]
             [jepsen.ydb.serializable :as serializable])
   (:import (java.time Duration)
            (java.util ArrayList)
@@ -67,9 +68,6 @@
   (id [this]
     "Returns the tranasction id")
 
-  (debug-info! [this]
-    "Returns accumulated debug info")
-
   (begin! [this]
     "Explicitly begin the transaction")
 
@@ -92,23 +90,12 @@
         (TxControl/id tx-id))
       (.setCommitTx commit)))
 
-(defn try-parse-debug-info
-  [debug-info]
-  (try
-    (json/read-str debug-info
-                   :key-fn #(keyword (.replace % \_ \-)))
-    (catch Exception e debug-info)))
-
 (deftype Transaction [session
                       ^:unsynchronized-mutable tx-id
-                      ^:unsynchronized-mutable auto-commit
-                      ^:unsynchronized-mutable debug-info]
+                      ^:unsynchronized-mutable auto-commit]
   ITransaction
   (id [this]
     tx-id)
-
-  (debug-info! [this]
-    (persistent! debug-info))
 
   (begin! [this]
     (assert (= tx-id nil) "Transaction is already in progress")
@@ -136,8 +123,8 @@
         (let [ast (-> result .getQueryStats .getQueryAst)]
           (when (. ast startsWith "debug-info:")
             (let [chunk (. ast substring 11)
-                  chunk (try-parse-debug-info chunk)]
-              (set! debug-info (conj! debug-info chunk))))))
+                  chunk (debug-info/try-parse-debug-info chunk)]
+              (debug-info/add-debug-info chunk)))))
       result))
 
   (commit! [this]
@@ -160,7 +147,7 @@
 
 (defn open-transaction
   [session]
-  (Transaction. session nil false (transient [])))
+  (Transaction. session nil false))
 
 (defmacro with-transaction
   {:clj-kondo/lint-as 'clojure.core/let}
@@ -232,14 +219,6 @@
     (if (> (.size result) 0)
       (vec result)
       nil)))
-
-(defn assoc-debug-info
-  "Associates accumulated debug info from tx with op when present."
-  [op tx]
-  (let [debug-info (debug-info! tx)]
-    (if (> (count debug-info) 0)
-      (assoc op :debug-info debug-info)
-      op)))
 
 (def ballast-obj (atom nil))
 
@@ -317,17 +296,17 @@
   (invoke! [_ test op]
     ; TODO: handle known errors!
     ;; (info "processing op:" op)
-    (with-errors op
-      (with-session [session table-client]
-        (with-transaction [tx session]
-          (let [txn (:value op)
-                txn' (mapv (partial apply-mop-with-auto-commit-last! test tx)
-                           txn
-                           (iterate inc 0)
-                           (repeat (count txn)))
-                op' (assoc op :type :ok, :value txn')
-                op' (assoc-debug-info op' tx)]
-            op')))))
+    (debug-info/with-debug-info
+      (with-errors op
+        (with-session [session table-client]
+          (with-transaction [tx session]
+            (let [txn (:value op)
+                  txn' (mapv (partial apply-mop-with-auto-commit-last! test tx)
+                             txn
+                             (iterate inc 0)
+                             (repeat (count txn)))
+                  op' (assoc op :type :ok, :value txn')]
+              op'))))))
 
   (teardown! [this test])
 
