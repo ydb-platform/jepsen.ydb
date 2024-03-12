@@ -1,5 +1,6 @@
 (ns jepsen.ydb.append
   (:require [clojure.tools.logging :refer [info]]
+            [clojure.string :as str]
             [jepsen.client :as client]
             [jepsen.tests.cycle.append :as append]
             [jepsen.ydb.conn :as conn]
@@ -32,37 +33,51 @@
   [test table-client]
   (info "dropping initial tables")
   (conn/with-session [session table-client]
-    (let [query (str "DROP TABLE IF EXISTS `" (:db-table test) "`;")]
+    (let [query (format "DROP TABLE IF EXISTS `%1$s`;" (:db-table test))]
       (conn/execute-scheme! session query))))
+
+(defn generate-partition-at-keys
+  "Generates a comma-separated list of partitioning keys"
+  [test]
+  (let [keys (:initial-partition-keys test)
+        count (:initial-partition-count test)]
+    (->> (iterate inc 1) ; 1, 2, 3, ...
+         (map #(+ (* % keys) 1)) ; 11, 21, 31, ...
+         (take (dec count))
+         (str/join ", "))))
 
 (defn create-initial-tables
   [test table-client]
   (info "creating initial tables")
   (conn/with-session [session table-client]
-    ; TODO: configurable partition size and initial partitioning
-    (let [query (str "CREATE TABLE `" (:db-table test) "` (
-                          key Int64,
-                          index Int64,
-                          value Int64,
-                          ballast string,
-                          PRIMARY KEY (key, index))
-                      WITH (AUTO_PARTITIONING_BY_SIZE = ENABLED,
-                            AUTO_PARTITIONING_BY_LOAD = ENABLED,
-                            AUTO_PARTITIONING_PARTITION_SIZE_MB = 10,
-                            PARTITION_AT_KEYS = (
-                                11, 21, 31, 41, 51, 61, 71, 81, 91, 101,
-                                111, 121, 131, 141, 151, 161, 171, 181, 191, 201,
-                                211, 221, 231, 241, 251, 261, 271, 281, 291, 301));")]
+    (let [query (format "CREATE TABLE `%1$s` (
+                             key Int64,
+                             index Int64,
+                             value Int64,
+                             ballast string,
+                             PRIMARY KEY (key, index))
+                         WITH (AUTO_PARTITIONING_BY_SIZE = ENABLED,
+                               AUTO_PARTITIONING_BY_LOAD = ENABLED,
+                               AUTO_PARTITIONING_PARTITION_SIZE_MB = %2$d,
+                               PARTITION_AT_KEYS = (%3$s));"
+                        (:db-table test)
+                        (:partition-size-mb test)
+                        (generate-partition-at-keys test))]
       (conn/execute-scheme! session query))))
+
+(defn list-read-query
+  [test]
+  (format "DECLARE $key AS Int64;
+           SELECT index, value FROM `%1$s`
+           WHERE key = $key
+           ORDER BY index"
+          (:db-table test)))
 
 (defn execute-list-read
   "Executes a list read for the given key k.
    Works only when the list has at most 1k values."
   [test tx k]
-  (let [query (str "DECLARE $key AS Int64;
-                    SELECT index, value FROM `" (:db-table test) "`
-                    WHERE key = $key
-                    ORDER BY index;")
+  (let [query (list-read-query test)
         params (Params/of "$key" (PrimitiveValue/newInt64 k))
         query-result (conn/execute! tx query params)
         rs (. query-result getResultSet 0)
@@ -81,13 +96,18 @@
       (. result add :truncated))
     (vec result)))
 
+(defn list-append-query
+  [test]
+  (format "DECLARE $key AS Int64;
+           DECLARE $value AS Int64;
+           DECLARE $ballast AS Bytes;
+           $next_index = (SELECT COALESCE(MAX(index) + 1, 0) FROM `%1$s` WHERE key = $key);
+           UPSERT INTO `%1$s` (key, index, value, ballast) VALUES ($key, $next_index, $value, $ballast);"
+          (:db-table test)))
+
 (defn execute-list-append
   [test tx k v]
-  (let [query (str "DECLARE $key AS Int64;
-                    DECLARE $value AS Int64;
-                    DECLARE $ballast AS Bytes;
-                    $next_index = (SELECT COALESCE(MAX(index) + 1, 0) FROM `" (:db-table test) "` WHERE key = $key);
-                    UPSERT INTO `" (:db-table test) "` (key, index, value, ballast) VALUES ($key, $next_index, $value, $ballast);")
+  (let [query (list-append-query test)
         params (Params/of "$key" (PrimitiveValue/newInt64 k)
                           "$value" (PrimitiveValue/newInt64 v)
                           "$ballast" (PrimitiveValue/newBytes *ballast*))]

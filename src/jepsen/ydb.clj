@@ -84,6 +84,21 @@
    [nil "--db-table NAME" "YDB table name to use for testing."
     :default "jepsen_test"]
 
+   [nil "--partition-size-mb NUM" "YDB table partition size in MBs"
+    :default 10
+    :parse-fn parse-long
+    :validate [pos? "Must be a positive integer"]]
+
+   [nil "--initial-partition-count NUM" "YDB table initial number of partitions"
+    :default 30
+    :parse-fn parse-long
+    :validate [pos? "Must be a positive integer"]]
+
+   [nil "--initial-partition-keys NUM" "YDB table initial number of keys per partition"
+    :default 10
+    :parse-fn parse-long
+    :validate [pos? "Must be a positive integer"]]
+
    [nil "--key-count NUM" "Number of keys in active rotation."
     :default  10
     :parse-fn parse-long
