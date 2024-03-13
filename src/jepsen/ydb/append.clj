@@ -195,19 +195,19 @@
              writes (volatile! (transient []))
              readmap (volatile! (transient {}))
              writeset (volatile! (transient #{}))
-                ; Returns true when the new op is compatible with currently batched ops
+             ; Returns true when the new op is compatible with currently batched ops
              compatible? (fn [[f k _]]
                            (case f
-                                ; Can read new key unless already read or written
+                             ; Can read new key unless already read or written
                              :r (not (or (contains? @readmap k) (contains? @writeset k)))
-                                ; Can write new key unless previously written (read + append is ok)
+                             ; Can write new key unless previously written (read + append is ok)
                              :append (not (contains? @writeset k))))
-                ; Returns true when the new op should be enqueued into the next batch
+             ; Returns true when the new op should be enqueued into the next batch
              should-enqueue? (fn [op]
                                (or (= 0 (count @ops))
                                    (and (compatible? op)
                                         (< (rand) batch-ops-probability))))
-                ; Enqueues op into the next batch
+             ; Enqueues op into the next batch
              enqueue! (fn [[f k v :as op]]
                         (when debug?
                           (info "enqueue!" op))
@@ -221,7 +221,7 @@
                                     (vswap! writes conj! [k v])
                                     (vswap! writeset conj! k)))
                         nil)
-                ; Returns current batch as a possible [:batch keys OperationBatch] operation and prepares for the next batch
+             ; Returns current batch as a possible [:batch keys OperationBatch] operation and prepares for the next batch
              flush! (fn []
                       (let [batch (if (or batch-single-ops
                                           (not= 1 (count @ops)))
@@ -258,15 +258,15 @@
             (when debug?
               (info "batch-compatible-operations input:" result op))
             (if (should-enqueue? op)
-                 ; Enqueue compatible ops into the next batch
+              ; Enqueue compatible ops into the next batch
               (do
                 (enqueue! op)
                 result)
-                 ; Flush current batch first
+              ; Flush current batch first
               (let [result (rf result (flush!))]
                 (when debug?
                   (info "batch-compatible-operations next result:" result))
-                   ; Enqueue op into (now empty) batch unless sink stops accepting new values
+                ; Enqueue op into (now empty) batch unless sink stops accepting new values
                 (when-not (reduced? result)
                   (enqueue! op))
                 result))))))))
