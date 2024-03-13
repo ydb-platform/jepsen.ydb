@@ -3,7 +3,6 @@
             [elle.list-append :as a]
             [jepsen.history :as h]
             [jepsen.checker :as checker]
-            [jepsen.tests.cycle.append :as append]
             [bifurcan-clj [core :as b]]
             [elle.graph :as g]
             [elle.rels :as rels :refer [ww wr rw process realtime]]

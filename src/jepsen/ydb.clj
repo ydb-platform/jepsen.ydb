@@ -71,6 +71,10 @@
        (map keyword)
        (mapcat #(get special-nemeses % [%]))))
 
+(defn valid-probabily?
+  [value]
+  (and (>= value 0.0) (<= value 1.0)))
+
 (def cli-opts
   "Command line options"
   [[nil "--db-name DBNAME" "YDB database name."
@@ -98,6 +102,19 @@
     :default 10
     :parse-fn parse-long
     :validate [pos? "Must be a positive integer"]]
+
+   [nil "--batch-single-ops" "Execute single ops using a batch query"
+    :default false]
+
+   [nil "--batch-ops-probability NUM" "Probability of batching compatibile operation with the previous one"
+    :default 0.0
+    :parse-fn parse-double
+    :validate [valid-probabily? "Must be between 0.0 and 1.0 inclusive"]]
+
+   [nil "--batch-commit-probability NUM" "Probability of batching commit with the last operation"
+    :default 1.0
+    :parse-fn parse-double
+    :validate [valid-probabily? "Must be between 0.0 and 1.0 inclusive"]]
 
    [nil "--key-count NUM" "Number of keys in active rotation."
     :default  10
