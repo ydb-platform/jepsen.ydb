@@ -133,19 +133,19 @@
                    (vswap! ops conj! [:append (persistent! @acc)])
                    (vreset! acc (transient []))
                    (vreset! write-index (transient {}))))]
-    (doall
-     (for [[f k v] mops]
-       (case f
-         :r (do
-              (flush!)
-              (let [index @read-index
-                    _ (vswap! read-index inc)]
-                (vswap! ops conj! [:r k])
-                (vswap! rs-map conj! index)))
-         :append (let [index (get @write-index k 0)]
-                   (vswap! acc conj! [k index v])
-                   (vswap! rs-map conj! nil)
-                   (vswap! write-index assoc! k (inc index))))))
+
+    (doseq [[f k v] mops]
+      (case f
+        :r (do
+             (flush!)
+             (let [index @read-index
+                   _ (vswap! read-index inc)]
+               (vswap! ops conj! [:r k])
+               (vswap! rs-map conj! index)))
+        :append (let [index (get @write-index k 0)]
+                  (vswap! acc conj! [k index v])
+                  (vswap! rs-map conj! nil)
+                  (vswap! write-index assoc! k (inc index)))))
     (flush!)
     [(persistent! @ops)
      (persistent! @rs-map)]))
@@ -199,21 +199,20 @@
         write-index (volatile! 0)
         ballast-param "$ballast"
         params (Params/create)]
-    (doall
-     (for [[f v] multi-ops]
-       (case f
-         :r (let [index @read-index
-                  _ (vswap! read-index inc)
-                  read-param (str "$read" index)]
-              (vswap! declares conj! (multi-ops-read-declare read-param))
-              (vswap! fragments conj! (multi-ops-read-fragment test read-param))
-              (. params put read-param (PrimitiveValue/newInt64 v)))
-         :append (let [index @write-index
-                       _ (vswap! write-index inc)
-                       write-param (str "$write" index)]
-                   (vswap! declares conj! (multi-ops-write-declare write-param))
-                   (vswap! fragments conj! (multi-ops-write-fragment test write-param ballast-param))
-                   (. params put write-param (multi-ops-write-value v))))))
+    (doseq [[f v] multi-ops]
+      (case f
+        :r (let [index @read-index
+                 _ (vswap! read-index inc)
+                 read-param (str "$read" index)]
+             (vswap! declares conj! (multi-ops-read-declare read-param))
+             (vswap! fragments conj! (multi-ops-read-fragment test read-param))
+             (. params put read-param (PrimitiveValue/newInt64 v)))
+        :append (let [index @write-index
+                      _ (vswap! write-index inc)
+                      write-param (str "$write" index)]
+                  (vswap! declares conj! (multi-ops-write-declare write-param))
+                  (vswap! fragments conj! (multi-ops-write-fragment test write-param ballast-param))
+                  (. params put write-param (multi-ops-write-value v)))))
     (when (> @write-index 0)
       (vswap! declares conj! (str "DECLARE " ballast-param " AS Bytes;\n"))
       (. params put ballast-param (PrimitiveValue/newBytes *ballast*)))
@@ -249,13 +248,12 @@
                                  (get @acc 0))]
                      (vswap! batches conj! batch)
                      (vreset! acc (transient [])))))]
-    (doall
-     (for [mop mops]
-       (let [batch? (or (= 0 (count @acc))
-                        (< (rand) batch-ops-probability))]
-         (when-not batch?
-           (flush!))
-         (vswap! acc conj! mop))))
+    (doseq [mop mops]
+      (let [batch? (or (= 0 (count @acc))
+                       (< (rand) batch-ops-probability))]
+        (when-not batch?
+          (flush!))
+        (vswap! acc conj! mop)))
     (flush!)
     (persistent! @batches)))
 

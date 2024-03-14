@@ -35,13 +35,12 @@
   [{:keys [options]}]
   (let [tests (sorted-tests)
         tests (drop (:keep options) tests)]
-    (doall
-     (for [t tests]
-       (if-let [reason (remove? t)]
-         (do
-           (info "Removing" reason "test" (:name t) (:time t))
-           (store/delete! (:name t) (:time t)))
-         (info "Skipping test" (:name t) (:time t)))))))
+    (doseq [t tests]
+      (if-let [reason (remove? t)]
+        (do
+          (info "Removing" reason "test" (:name t) (:time t))
+          (store/delete! (:name t) (:time t)))
+        (info "Skipping test" (:name t) (:time t))))))
 
 (defn clean-valid-cmd
   "A clean-valid command"
