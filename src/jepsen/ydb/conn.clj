@@ -6,6 +6,7 @@
            (tech.ydb.core UnexpectedResultException)
            (tech.ydb.core.grpc GrpcTransport)
            (tech.ydb.table TableClient)
+           (tech.ydb.table.query Params)
            (tech.ydb.table.settings BeginTxSettings)
            (tech.ydb.table.settings CommitTxSettings)
            (tech.ydb.table.settings RollbackTxSettings)
@@ -88,6 +89,8 @@
               chunk (debug-info/try-parse-debug-info chunk)]
           (debug-info/add-debug-info chunk))))))
 
+(def commit-via-select-1? true)
+
 (deftype Transaction [session
                       ^:unsynchronized-mutable tx-id
                       ^:unsynchronized-mutable auto-commit]
@@ -128,11 +131,18 @@
   (commit! [this]
     (assert (= auto-commit false) "Cannot commit transaction after the call to auto-commit!")
     (when (not (= tx-id nil))
-      (-> session
-          (.commitTransaction tx-id (CommitTxSettings.))
-          .join
-          .expectSuccess)
-      (set! tx-id nil)))
+      (if commit-via-select-1?
+        (do
+          ; Perform SELECT 1 with auto commit to gather debug-info
+          (set! auto-commit true)
+          (execute! this "SELECT 1" (Params/empty))
+          nil)
+        (do
+          (-> session
+              (.commitTransaction tx-id (CommitTxSettings.))
+              .join
+              .expectSuccess)
+          (set! tx-id nil)))))
 
   (rollback! [this]
     (set! auto-commit false)
