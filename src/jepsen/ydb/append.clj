@@ -273,8 +273,8 @@
   ([test coll]
    (sequence (batch-compatible-operations test) coll)))
 
-(defn batch-commit-next
-  "Inserts a [:commit-next nil nil] micro op before the last micro op based on configured probability."
+(defn batch-commit-last
+  "Wraps the last micro op into [:commit nil mop] based on configured probability."
   ([test]
    (let [probability (:batch-commit-probability test 1.0)]
      (fn [rf]
@@ -286,15 +286,11 @@
                   _ (vreset! last ::none)
                   result (if (identical? final ::none)
                            result
-                           (unreduced
-                            (if (< (rand) probability)
-                              ; Push :commit-next micro op, then final value when acceptable
-                              (let [result (rf result [:commit-next nil nil])]
-                                (if (reduced? result)
-                                  result
-                                  (rf result final)))
-                              ; Push final value without :commit-next
-                              (rf result final))))]
+                           ; Push a wrapped final value
+                           (let [final (if (< (rand) probability)
+                                         [:commit nil final]
+                                         final)]
+                             (unreduced (rf result final))))]
               (rf result)))
            ([result op]
             (let [prev @last
@@ -308,7 +304,7 @@
                     (vreset! last op))
                   result)))))))))
   ([test coll]
-   (sequence (batch-commit-next test) coll)))
+   (sequence (batch-commit-last test) coll)))
 
 (defn apply-mop!
   [test tx [f k v :as mop]]
@@ -324,9 +320,9 @@
                        :r [f k (get results (get readmap k))]
                        :append mop))
                    (:ops v)))
-    :commit-next (do
-                   (conn/auto-commit! tx)
-                   [])))
+    :commit (do
+              (conn/auto-commit! tx)
+              (apply-mop! test tx v))))
 
 (defrecord Client [transport table-client ballast setup?]
   client/Client
@@ -349,13 +345,18 @@
           (conn/with-session [session table-client]
             (conn/with-transaction [tx session]
               (let [txn (:value op)
-                    txn' (into []
-                               (mapcat (partial apply-mop! test tx)
-                                       (->> txn
-                                            (batch-compatible-operations test)
-                                            (batch-commit-next test))))
-                    op' (assoc op :type :ok, :value txn')]
-                op')))))))
+                    ; modified transaction we are going to execute
+                    txn' (->> txn
+                              (batch-compatible-operations test)
+                              (batch-commit-last test)
+                              (into []))
+                    op' (if (not= txn txn') (assoc op :modified-txn txn') op)
+                    ; execute modified transaction and gather results
+                    txn'' (->> txn'
+                               (mapcat (partial apply-mop! test tx))
+                               (into []))
+                    op'' (assoc op' :type :ok, :value txn'')]
+                op'')))))))
 
   (teardown! [this test])
 

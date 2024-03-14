@@ -72,34 +72,34 @@
                     [:batch #{2} (OperationBatch. [[:r 2 nil]] [2] [] {2 0})]]]
       (is (= expected (make-batch {:batch-ops-probability 0.0} ops))))))
 
-(defn- with-commit-next
+(defn- with-commit-last
   [test ops & xforms]
-  (into [] (apply comp (append/batch-commit-next test) xforms) ops))
+  (into [] (apply comp (append/batch-commit-last test) xforms) ops))
 
-(deftest batch-commit-next
+(deftest batch-commit-last
   (testing "Empty list of operations"
-    (is (= [] (with-commit-next {} []))))
+    (is (= [] (with-commit-last {} []))))
   (testing "A single operation"
     (let [ops [[:r 1 nil]]
-          expected [[:commit-next nil nil] [:r 1 nil]]]
-      (is (= expected (with-commit-next {} ops)))))
+          expected [[:commit nil [:r 1 nil]]]]
+      (is (= expected (with-commit-last {} ops)))))
   (testing "Two operations"
     (let [ops [[:r 1 nil] [:r 2 nil]]
-          expected [[:r 1 nil] [:commit-next nil nil] [:r 2 nil]]]
-      (is (= expected (with-commit-next {} ops)))))
+          expected [[:r 1 nil] [:commit nil [:r 2 nil]]]]
+      (is (= expected (with-commit-last {} ops)))))
   (testing "Multiple operations"
     (let [ops [[:r 1 nil] [:r 2 nil] [:r 3 nil] [:r 4 nil]]
-          expected [[:r 1 nil] [:r 2 nil] [:r 3 nil] [:commit-next nil nil] [:r 4 nil]]]
-      (is (= expected (with-commit-next {} ops)))))
-  (testing "Multiple operations, take 4"
-    (let [ops [[:r 1 nil] [:r 2 nil] [:r 3 nil] [:r 4 nil]]
-          expected [[:r 1 nil] [:r 2 nil] [:r 3 nil] [:commit-next nil nil]]]
-      (is (= expected (with-commit-next {} ops (take 4))))))
+          expected [[:r 1 nil] [:r 2 nil] [:r 3 nil] [:commit nil [:r 4 nil]]]]
+      (is (= expected (with-commit-last {} ops)))))
   (testing "Multiple operations, take 3"
     (let [ops [[:r 1 nil] [:r 2 nil] [:r 3 nil] [:r 4 nil]]
           expected [[:r 1 nil] [:r 2 nil] [:r 3 nil]]]
-      (is (= expected (with-commit-next {} ops (take 3))))))
-  (testing "Multiple operations, no :commit-next due to low probability"
+      (is (= expected (with-commit-last {} ops (take 3))))))
+  (testing "Multiple operations, take 2"
+    (let [ops [[:r 1 nil] [:r 2 nil] [:r 3 nil] [:r 4 nil]]
+          expected [[:r 1 nil] [:r 2 nil]]]
+      (is (= expected (with-commit-last {} ops (take 2))))))
+  (testing "Multiple operations, no :commit due to low probability"
     (let [ops [[:r 1 nil] [:r 2 nil] [:r 3 nil] [:r 4 nil]]
           expected ops]
-      (is (= expected (with-commit-next {:batch-commit-probability 0.0} ops))))))
+      (is (= expected (with-commit-last {:batch-commit-probability 0.0} ops))))))
