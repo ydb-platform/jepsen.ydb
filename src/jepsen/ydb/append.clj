@@ -81,13 +81,13 @@
   [rs]
   (let [result (ArrayList.)]
     (while (. rs next)
-      (let [index (-> rs (.getColumn 0) .getInt64)
-            value (-> rs (.getColumn 1) .getInt64)
-            expectedIndex (.size result)]
-        (assert (<= index expectedIndex) "List indexes are not distinct or not ordered correctly")
+      (let [expectedIndex (.size result)
+            index (-> rs (.getColumn 0) .getInt64)
+            value (-> rs (.getColumn 1) .getInt64)]
+        (assert (<= expectedIndex index) "List indexes are not distinct or not ordered correctly")
         ; In the unlikely case some indexes are missing fill those with nils
-        (when (< index expectedIndex)
-          (dotimes [_ (- expectedIndex index)]
+        (when (< expectedIndex index)
+          (dotimes [_ (- index expectedIndex)]
             (. result add nil)))
         (. result add value)))
     (when (.isTruncated rs)
@@ -120,158 +120,144 @@
                           "$ballast" (PrimitiveValue/newBytes *ballast*))]
     (conn/execute! tx query params)))
 
-(defn list-multi-read-and-append-query
-  "Returns a query that performs read-count reads then write-count writes
-
-   Each read has a $read<N> parameter, which would correspond to a separate result set.
-
-   When write-count is positive a $writes (key/value) and $ballast parameters will be expected,
-   each naming a separate write. Keys must be distinct."
-  [test read-count write-count]
-  (let [declares (concat
-                  (->> (range read-count)
-                       (map #(str "DECLARE $read" (inc %) " AS Int64;\n")))
-                  (if (pos? write-count)
-                    ["DECLARE $writes AS List<Struct<key:Int64, value:Int64>>;\n"
-                     "DECLARE $ballast AS Bytes;\n"]
-                    []))
-        selects (->> (range read-count)
-                     (map #(format "SELECT index, value FROM `%1$s` WHERE key = $read%2$d ORDER BY index;\n" (:db-table test) (inc %))))
-        appends (if (pos? write-count)
-                  ["UPSERT INTO `" (:db-table test) "` (\n"
-                   "    SELECT w.key AS key, COALESCE(MAX(t.index) + 1, 0) AS index, w.value AS value, $ballast AS ballast\n"
-                   "    FROM AS_TABLE($writes) AS w\n"
-                   "    LEFT JOIN `" (:db-table test) "` AS t ON t.key = w.key\n"
-                   "    GROUP BY w.key, w.value\n"
-                   ");\n"]
-                  [])]
-    (apply str (concat declares selects appends))))
-
-(defn make-multi-read-and-append-params
-  [reads writes]
-  (let [params (Params/create (+ (count reads) (if (pos? (count writes)) 2 0)))]
+(defn mops->multi-ops
+  "Given a series of micro-ops returns a [multi-ops rs-map] tuple."
+  [mops]
+  (let [ops (volatile! (transient []))
+        rs-map (volatile! (transient []))
+        read-index (volatile! 0)
+        acc (volatile! (transient []))
+        write-index (volatile! (transient {}))
+        flush! (fn []
+                 (when (> (count @acc) 0)
+                   (vswap! ops conj! [:append (persistent! @acc)])
+                   (vreset! acc (transient []))
+                   (vreset! write-index (transient {}))))]
     (doall
-     (map-indexed
-      (fn [i v]
-        (. params put (str "$read" (inc i)) (PrimitiveValue/newInt64 v)))
-      reads))
-    (when (pos? (count writes))
-      (let [writeValues (map (fn [[k v]]
-                               (StructValue/of "key" (PrimitiveValue/newInt64 k)
-                                               "value" (PrimitiveValue/newInt64 v)))
-                             writes)
-            writeList (ListValue/of (into-array Value writeValues))]
-        (. params put "$writes" writeList)
-        (. params put "$ballast" (PrimitiveValue/newBytes *ballast*))))
-    params))
+     (for [[f k v] mops]
+       (case f
+         :r (do
+              (flush!)
+              (let [index @read-index
+                    _ (vswap! read-index inc)]
+                (vswap! ops conj! [:r k])
+                (vswap! rs-map conj! index)))
+         :append (let [index (get @write-index k 0)]
+                   (vswap! acc conj! [k index v])
+                   (vswap! rs-map conj! nil)
+                   (vswap! write-index assoc! k (inc index))))))
+    (flush!)
+    [(persistent! @ops)
+     (persistent! @rs-map)]))
 
-(defn execute-multi-read-and-append-query
-  "Executes reads (a vec of keys) and writes (a vec of key/value pairs) as a single query.
+(defn multi-ops-read-declare
+  [read-param]
+  (str "DECLARE " read-param " AS Int64;\n"))
 
-   Returns a vec of results for each read in the same order."
-  [test tx reads writes]
-  (let [query (list-multi-read-and-append-query test (count reads) (count writes))
-        params (make-multi-read-and-append-params reads writes)
-        query-result (conn/execute! tx query params)]
-    (->> (range (count reads))
-         (mapv #(parse-list-read-result (. query-result getResultSet %))))))
+(defn multi-ops-read-fragment
+  [test read-param]
+  (str "SELECT index, value FROM `" (:db-table test) "` WHERE key = " read-param " ORDER BY index;\n"))
 
-(defrecord OperationBatch [ops reads writes readmap])
+(defn multi-ops-write-declare
+  [write-param]
+  (str "DECLARE " write-param " AS List<Struct<key:Int64, index:Int64, value:Int64>>;\n"))
 
-(defn batch-compatible-operations
-  "Combines compatible micro-ops into batches.
+(defn multi-ops-write-fragment
+  [test write-param ballast-param]
+  (str write-param "_keys = (SELECT DISTINCT(key) FROM AS_TABLE(" write-param "));\n"
+       write-param "_last_index = (\n"
+       "    SELECT w.key AS key, MAX(t.index) AS index\n"
+       "    FROM " write-param "_keys AS w\n"
+       "    INNER JOIN `" (:db-table test) "` AS t ON t.key = w.key\n"
+       "    GROUP BY w.key\n"
+       ");\n"
+       "UPSERT INTO `" (:db-table test) "` (\n"
+       "    SELECT w.key AS key,\n"
+       "           COALESCE(li.index + 1, 0) + w.index AS index,\n"
+       "           w.value AS value,\n"
+       "           " ballast-param " AS ballast\n"
+       "    FROM AS_TABLE(" write-param ") AS w\n"
+       "    LEFT JOIN " write-param "_last_index AS li ON li.key = w.key\n"
+       ");\n"))
 
-   When used as a (batch-compatible-operations test) returns a transducer.
+(defn multi-ops-write-value
+  [writes]
+  (let [writeValues (map (fn [[key index value]]
+                           (StructValue/of "key" (PrimitiveValue/newInt64 key)
+                                           "index" (PrimitiveValue/newInt64 index)
+                                           "value" (PrimitiveValue/newInt64 value)))
+                         writes)
+        writeList (ListValue/of (into-array Value writeValues))]
+    writeList))
 
-   When used as a (batch-compatible-operations test coll) returns a lazy sequence transforming coll."
-  ([test]
-   (let [debug? (:debug-batch-compatible-operations? test false)
-         batch-single-ops (:batch-single-ops test true)
-         batch-ops-probability (:batch-ops-probability test 1.0)]
-     (fn [rf]
-       (let [ops (volatile! (transient []))
-             keys (volatile! (transient #{}))
-             reads (volatile! (transient []))
-             writes (volatile! (transient []))
-             readmap (volatile! (transient {}))
-             writeset (volatile! (transient #{}))
-             ; Returns true when the new op is compatible with currently batched ops
-             compatible? (fn [[f k _]]
-                           (case f
-                             ; Can read new key unless already read or written
-                             :r (not (or (contains? @readmap k) (contains? @writeset k)))
-                             ; Can write new key unless previously written (read + append is ok)
-                             :append (not (contains? @writeset k))))
-             ; Returns true when the new op should be enqueued into the next batch
-             should-enqueue? (fn [op]
-                               (or (= 0 (count @ops))
-                                   (and (compatible? op)
-                                        (< (rand) batch-ops-probability))))
-             ; Enqueues op into the next batch
-             enqueue! (fn [[f k v :as op]]
-                        (when debug?
-                          (info "enqueue!" op))
-                        (vswap! ops conj! op)
-                        (vswap! keys conj! k)
-                        (case f
-                          :r (let [readIndex (count @reads)]
-                               (vswap! reads conj! k)
-                               (vswap! readmap assoc! k readIndex))
-                          :append (do
-                                    (vswap! writes conj! [k v])
-                                    (vswap! writeset conj! k)))
-                        nil)
-             ; Returns current batch as a possible [:batch keys OperationBatch] operation and prepares for the next batch
-             flush! (fn []
-                      (let [batch (if (or batch-single-ops
-                                          (not= 1 (count @ops)))
-                                    [:batch
-                                     (persistent! @keys)
-                                     (OperationBatch.
-                                      (persistent! @ops)
-                                      (persistent! @reads)
-                                      (persistent! @writes)
-                                      (persistent! @readmap))]
-                                    (get @ops 0))]
-                        (when debug?
-                          (info "batch-compatible-operations flush!" batch))
-                        (vreset! ops (transient []))
-                        (vreset! keys (transient #{}))
-                        (vreset! reads (transient []))
-                        (vreset! writes (transient []))
-                        (vreset! readmap (transient {}))
-                        (vreset! writeset (transient #{}))
-                        batch))]
-         (fn
-           ([] (rf))
-           ([result]
-            (when debug?
-              (info "batch-compatible-operations reduced:" result))
-            (let [result (if (= 0 (count @ops))
-                           result
-                           (let [result (rf result (flush!))]
-                             (when debug?
-                               (info "batch-compatible-operations final result:" result))
-                             (unreduced result)))]
-              (rf result)))
-           ([result op]
-            (when debug?
-              (info "batch-compatible-operations input:" result op))
-            (if (should-enqueue? op)
-              ; Enqueue compatible ops into the next batch
-              (do
-                (enqueue! op)
-                result)
-              ; Flush current batch first
-              (let [result (rf result (flush!))]
-                (when debug?
-                  (info "batch-compatible-operations next result:" result))
-                ; Enqueue op into (now empty) batch unless sink stops accepting new values
-                (when-not (reduced? result)
-                  (enqueue! op))
-                result))))))))
-  ([test coll]
-   (sequence (batch-compatible-operations test) coll)))
+(defn multi-ops->query
+  "Transforms multi-ops to [query, params] tuple, ready to be executed."
+  [test multi-ops]
+  (let [declares (volatile! (transient []))
+        fragments (volatile! (transient []))
+        read-index (volatile! 0)
+        write-index (volatile! 0)
+        ballast-param "$ballast"
+        params (Params/create)]
+    (doall
+     (for [[f v] multi-ops]
+       (case f
+         :r (let [index @read-index
+                  _ (vswap! read-index inc)
+                  read-param (str "$read" index)]
+              (vswap! declares conj! (multi-ops-read-declare read-param))
+              (vswap! fragments conj! (multi-ops-read-fragment test read-param))
+              (. params put read-param (PrimitiveValue/newInt64 v)))
+         :append (let [index @write-index
+                       _ (vswap! write-index inc)
+                       write-param (str "$write" index)]
+                   (vswap! declares conj! (multi-ops-write-declare write-param))
+                   (vswap! fragments conj! (multi-ops-write-fragment test write-param ballast-param))
+                   (. params put write-param (multi-ops-write-value v))))))
+    (when (> @write-index 0)
+      (vswap! declares conj! (str "DECLARE " ballast-param " AS Bytes;\n"))
+      (. params put ballast-param (PrimitiveValue/newBytes *ballast*)))
+    [(apply str (concat (persistent! @declares)
+                        (persistent! @fragments)))
+     params]))
+
+(defn execute-list-batch
+  "Executes a sequence of micro-ops as a single batch query."
+  [test tx mops]
+  (let [[multi-ops rs-map] (mops->multi-ops mops)
+        [query params] (multi-ops->query test multi-ops)
+        query-result (conn/execute! tx query params)
+        result (mapv (fn [[f k _ :as mop] rs-index]
+                       (case f
+                         :r [f k (parse-list-read-result (. query-result getResultSet rs-index))]
+                         :append mop))
+                     mops rs-map)]
+    result))
+
+(defn batch-operations
+  "Randomly combines consecutive micro-ops into batches based on configured probability."
+  [test mops]
+  (let [batch-single-ops (:batch-single-ops test true)
+        batch-ops-probability (:batch-ops-probability test 1.0)
+        batches (volatile! (transient []))
+        acc (volatile! (transient []))
+        flush! (fn []
+                 (when (> (count @acc) 0)
+                   (let [batch (if (or batch-single-ops
+                                       (not= (count @acc) 1))
+                                 [:batch nil (persistent! @acc)]
+                                 (get @acc 0))]
+                     (vswap! batches conj! batch)
+                     (vreset! acc (transient [])))))]
+    (doall
+     (for [mop mops]
+       (let [batch? (or (= 0 (count @acc))
+                        (< (rand) batch-ops-probability))]
+         (when-not batch?
+           (flush!))
+         (vswap! acc conj! mop))))
+    (flush!)
+    (persistent! @batches)))
 
 (defn batch-commit-last
   "Wraps the last micro op into [:commit nil mop] based on configured probability."
@@ -313,13 +299,7 @@
     :append [(do
                (execute-list-append test tx k v)
                mop)]
-    :batch (let [results (execute-multi-read-and-append-query test tx (:reads v) (:writes v))
-                 readmap (:readmap v)]
-             (mapv (fn [[f k _ :as mop]]
-                     (case f
-                       :r [f k (get results (get readmap k))]
-                       :append mop))
-                   (:ops v)))
+    :batch (execute-list-batch test tx v)
     :commit (do
               (conn/auto-commit! tx)
               (apply-mop! test tx v))))
@@ -347,7 +327,7 @@
               (let [txn (:value op)
                     ; modified transaction we are going to execute
                     txn' (->> txn
-                              (batch-compatible-operations test)
+                              (batch-operations test)
                               (batch-commit-last test)
                               (into []))
                     op' (if (not= txn txn') (assoc op :modified-txn txn') op)
