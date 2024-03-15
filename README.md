@@ -1,3 +1,7 @@
+<img width="64" src="https://raw.githubusercontent.com/ydb-platform/ydb/main/ydb/docs/_assets/logo.svg" /><br/>
+
+[![License](https://img.shields.io/badge/License-EPL%2D%2D2.0-blue.svg)](https://github.com/ydb-platform/jepsen.ydb/blob/main/LICENSE)
+
 # jepsen.ydb
 
 A Clojure library for testing YDB with Jepsen.
@@ -16,7 +20,7 @@ lein run test --nodes-file ~/ydb-nodes.txt --db-name /your/db/name --username $U
 
 ## License
 
-Copyright © 2024 FIXME
+Copyright © 2024 YANDEX LLC
 
 This program and the accompanying materials are made available under the
 terms of the Eclipse Public License 2.0 which is available at
