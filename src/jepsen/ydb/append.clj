@@ -43,7 +43,8 @@
 (defn is-issue-db-path-not-found?
   [issue]
   (let [message (.getMessage issue)]
-    (.contains message "Path does not exist")))
+    (or (.contains message "Path does not exist")
+        (some is-issue-db-path-not-found? (.getIssues issue)))))
 
 (defn is-status-db-path-not-found?
   [status]
