@@ -8,6 +8,7 @@
             [jepsen.ydb.serializable :as ydb-serializable])
   (:import (java.util ArrayList)
            (com.google.protobuf ByteString)
+           (tech.ydb.core StatusCode)
            (tech.ydb.table.query Params)
            (tech.ydb.table.values PrimitiveValue)
            (tech.ydb.table.values StructValue)
@@ -32,12 +33,48 @@
   `(locking ~atomic-bool
      (when (compare-and-set! ~atomic-bool false true) ~@body)))
 
-(defn drop-initial-tables
+(defn drop-initial-tables-post-24-1
   [test table-client]
   (info "dropping initial tables")
   (conn/with-session [session table-client]
     (let [query (format "DROP TABLE IF EXISTS `%1$s`;" (:db-table test))]
       (conn/execute-scheme! session query))))
+
+(defn is-issue-db-path-not-found?
+  [issue]
+  (let [message (.getMessage issue)]
+    (.contains message "Path does not exist")))
+
+(defn is-status-db-path-not-found?
+  [status]
+  (if (= StatusCode/SCHEME_ERROR (.getCode status))
+    (some is-issue-db-path-not-found? (.getIssues status))
+    nil))
+
+(defn db-table-exists
+  [test session table-name]
+  (let [table-path (str (:db-name test) "/" table-name)
+        result (-> session
+                   (.describeTable table-path)
+                   .join)
+        status (.getStatus result)]
+    (when-not (is-status-db-path-not-found? status)
+      (.expectSuccess status))))
+
+(defn db-drop-table-if-exists
+  [test session table-name]
+  (let [table-path (str (:db-name test) "/" table-name)
+        status (-> session
+                   (.dropTable table-path)
+                   .join)]
+    (when-not (is-status-db-path-not-found? status)
+      (.expectSuccess status))))
+
+(defn drop-initial-tables
+  [test table-client]
+  (info "dropping initial tables")
+  (conn/with-session [session table-client]
+    (db-drop-table-if-exists test session (:db-table test))))
 
 (defn generate-partition-at-keys
   "Generates a comma-separated list of partitioning keys"
