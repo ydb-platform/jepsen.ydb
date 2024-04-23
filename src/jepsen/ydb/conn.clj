@@ -38,7 +38,7 @@
 
 (defmacro with-session
   "Wraps code block, opening session before the start and closing it before leaving.
-   
+
    (with-session [session table-client]
      ... use session)"
   {:clj-kondo/lint-as 'clojure.core/let}
@@ -159,7 +159,7 @@
 
 (defmacro with-transaction
   "Wraps a code block with a Transaction object, which will be committed on success or rolled back on exception.
-   
+
    (with-transaction [tx session]
      ... use tx object)"
   {:clj-kondo/lint-as 'clojure.core/let}
