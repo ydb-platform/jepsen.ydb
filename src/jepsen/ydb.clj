@@ -75,6 +75,10 @@
   [value]
   (and (>= value 0.0) (<= value 1.0)))
 
+(defn valid-read-replicas?
+  [value]
+  (>= value 0))
+
 (def cli-opts
   "Command line options"
   [[nil "--db-name DBNAME" "YDB database name."
@@ -102,6 +106,14 @@
     :default 10
     :parse-fn parse-long
     :validate [pos? "Must be a positive integer"]]
+
+   [nil "--with-read-replicas NUM" "Additional per-az read replicas for the YDB table"
+    :default 0
+    :parse-fn parse-long
+    :validate [valid-read-replicas? "Must a 0 or greater"]]
+
+   [nil "--with-changefeed" "Additional updates changefeed for the YDB table"
+    :default false]
 
    [nil "--batch-single-ops" "Execute single ops using a batch query"
     :default false]

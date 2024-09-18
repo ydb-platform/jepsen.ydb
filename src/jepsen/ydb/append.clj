@@ -78,14 +78,25 @@
     (db-drop-table-if-exists test session (:db-table test))))
 
 (defn generate-partition-at-keys
-  "Generates a comma-separated list of partitioning keys"
+  "Generates an optional PARTITION_AT_KEYS fragment with a list of partitioning keys"
   [test]
   (let [keys (:initial-partition-keys test)
         count (:initial-partition-count test)]
-    (->> (iterate inc 1) ; 1, 2, 3, ...
-         (map #(+ (* % keys) 1)) ; 11, 21, 31, ...
-         (take (dec count))
-         (str/join ", "))))
+    (if (> count 1)
+      (format "PARTITION_AT_KEYS = (%s),"
+              (->> (iterate inc 1) ; 1, 2, 3, ...
+                   (map #(+ (* % keys) 1)) ; 11, 21, 31, ...
+                   (take (dec count))
+                   (str/join ", ")))
+      "")))
+
+(defn generate-read-replicas-settings
+  "Generates an optional READ_REPLICAS_SETTINGS fragment"
+  [test]
+  (let [count (:with-read-replicas test)]
+    (if (> count 0)
+      (format "READ_REPLICAS_SETTINGS = \"PER_AZ:%s\"," count)
+      "")))
 
 (defn create-initial-tables
   [test table-client]
@@ -97,14 +108,26 @@
                              value Int64,
                              ballast string,
                              PRIMARY KEY (key, index))
-                         WITH (AUTO_PARTITIONING_BY_SIZE = ENABLED,
+                         WITH (%3$s
+                               %4$s
+                               AUTO_PARTITIONING_BY_SIZE = ENABLED,
                                AUTO_PARTITIONING_BY_LOAD = ENABLED,
-                               AUTO_PARTITIONING_PARTITION_SIZE_MB = %2$d,
-                               PARTITION_AT_KEYS = (%3$s));"
+                               AUTO_PARTITIONING_PARTITION_SIZE_MB = %2$d);"
                         (:db-table test)
                         (:partition-size-mb test)
-                        (generate-partition-at-keys test))]
-      (conn/execute-scheme! session query))))
+                        (generate-partition-at-keys test)
+                        (generate-read-replicas-settings test))]
+      (conn/execute-scheme! session query)
+      (when (:with-changefeed test)
+        (let [query (format "ALTER TABLE `%1$s`
+                             ADD CHANGEFEED `updates_feed`
+                             WITH (FORMAT = 'JSON',
+                                   MODE = 'UPDATES',
+                                   TOPIC_MIN_ACTIVE_PARTITIONS = 1,
+                                   VIRTUAL_TIMESTAMPS = TRUE,
+                                   RESOLVED_TIMESTAMPS = Interval('PT1S'))"
+                            (:db-table test))]
+          (conn/execute-scheme! session query))))))
 
 (defn list-read-query
   [test]
