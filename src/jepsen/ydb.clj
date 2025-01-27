@@ -14,12 +14,20 @@
             [jepsen.tests :as tests]
             [jepsen.control.util :as cu]
             [jepsen.ydb.cli.clean :refer [clean-valid-cmd]]
-            [jepsen.ydb.append :as append]))
+            [jepsen.ydb.append :as append]
+            [jepsen.ydb.append-with-deletes :as append-with-deletes]))
+
+(defn ydb-workload
+  "Returns the workload"
+  [opts]
+  (case (:workload-name opts)
+    "append" (append/workload opts)
+    "append-with-deletes" (append-with-deletes/workload opts)))
 
 (defn ydb-test
   "Tests YDB"
   [opts]
-  (let [workload (append/workload opts)
+  (let [workload (ydb-workload opts)
         db       db/noop
         os       os/noop
         packages (nc/nemesis-packages
@@ -91,6 +99,9 @@
 
    [nil "--db-table NAME" "YDB table name to use for testing."
     :default "jepsen_test"]
+
+   [nil "--workload-name NAME" "YDB workload name to test."
+    :default "append"]
 
    [nil "--partition-size-mb NUM" "YDB table partition size in MBs"
     :default 10
