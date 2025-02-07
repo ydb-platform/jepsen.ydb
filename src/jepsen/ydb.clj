@@ -24,6 +24,19 @@
     "append" (append/workload opts)
     "append-with-deletes" (append-with-deletes/workload opts)))
 
+(defn ydb-unhandled-exceptions
+  "Returns a checker for unhandled exceptions"
+  [opts]
+  (let [wrapped (checker/unhandled-exceptions)]
+    (if (:allow-exceptions opts)
+      wrapped
+      (reify checker/Checker
+        (check [_this test history opts]
+          (let [result (checker/check wrapped test history opts)]
+            (if (and (:valid? result) (seq (:exceptions result)))
+              (merge result {:valid? false})
+              result)))))))
+
 (defn ydb-test
   "Tests YDB"
   [opts]
@@ -59,7 +72,7 @@
                               {:nemeses (:perf nemesis)})
                        :clock (checker/clock-plot)
                        :stats (checker/stats)
-                       :exceptions (checker/unhandled-exceptions)
+                       :exceptions (ydb-unhandled-exceptions opts)
                        :workload (:checker workload)})
             :generator (->> (:generator workload)
                             (gen/stagger (/ (:rate opts)))
@@ -102,6 +115,9 @@
 
    [nil "--workload-name NAME" "YDB workload name to test."
     :default "append"]
+
+   [nil "--allow-exceptions" "Relaxes the test to allow unhandled exceptions."
+    :default false]
 
    [nil "--partition-size-mb NUM" "YDB table partition size in MBs"
     :default 10
