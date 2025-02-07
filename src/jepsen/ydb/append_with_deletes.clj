@@ -171,14 +171,16 @@
            DECLARE $value AS Int64;
            DECLARE $ballast AS Bytes;
            $prev_state = (SELECT version, index, value FROM `%1$s` WHERE key = $key);
-           $next_version = (SELECT COALESCE(MAX(version) + 1, 1) FROM $prev_state);
+           $prev_version = (SELECT COALESCE(MAX(version), 0) FROM $prev_state);
+           $next_version = $prev_version + 1;
            $next_index = (SELECT COALESCE(MAX(index) + 1, 0) FROM $prev_state);
-           DELETE FROM `%1$s` WHERE key = $key;
+           DELETE FROM `%1$s` WHERE key = $key AND version = $prev_version;
            UPSERT INTO `%1$s`
                SELECT $key AS key, $next_version AS version, index, value, $ballast AS ballast FROM $prev_state
                UNION ALL
-               SELECT $key AS key, $next_version AS version, $next_index AS index, $value AS value, $ballast AS ballast
-           ;"
+               SELECT $key AS key, $next_version AS version, $next_index AS index, $value AS value, $ballast AS ballast;
+           -- redundant read forces uncommitted changes to be flushed
+           SELECT COUNT(*) FROM `%1$s` WHERE key = $key;"
           (:db-table test)))
 
 (defn execute-list-append
