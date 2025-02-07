@@ -140,13 +140,15 @@
 
 (defn parse-list-read-result
   "Parses a single ResultSet of a read into a vec of values"
-  [rs]
+  [rs k]
   (let [result (ArrayList.)]
     (while (. rs next)
       (let [expectedIndex (.size result)
             index (-> rs (.getColumn 0) .getInt64)
             value (-> rs (.getColumn 1) .getInt64)]
-        (assert (<= expectedIndex index) "List indexes are not distinct or not ordered correctly")
+        (assert (<= expectedIndex index)
+                (format "List %s indexes are not distinct or not ordered correctly (index# %s expected# %s)"
+                        k index expectedIndex))
         ; In the unlikely case some indexes are missing fill those with nils
         (when (< expectedIndex index)
           (dotimes [_ (- index expectedIndex)]
@@ -163,7 +165,7 @@
   (let [query (list-read-query test)
         params (Params/of "$key" (PrimitiveValue/newInt64 k))
         query-result (conn/execute! tx query params)]
-    (parse-list-read-result (. query-result getResultSet 0))))
+    (parse-list-read-result (. query-result getResultSet 0) k)))
 
 (defn list-append-query
   [test]
