@@ -8,13 +8,17 @@ A command line utility for testing YDB with Jepsen.
 
 ## Usage
 
-Install `gnuplot-nox` and `graphviz` packages at the control node.
-
-Create a `~/ydb-nodes.txt` file that lists your YDB cluster nodes.
-
-Example command for running the test:
-
+1. Install `gnuplot-nox` and `graphviz` packages at the control node.
+2. Install JDK (arcadia one is too old), for example [adoptium](https://adoptium.net/temurin).
+3. Set `JAVA_CMD` env:
+```bash
+export JAVA_CMD=/home/iddqd/tmp/jdk-21.0.8+9/bin/java
 ```
+4. Download [lean](https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein) to `/usr/local/bin/`
+5. Create a `~/ydb-nodes.txt` file that lists your YDB cluster nodes.
+
+6. Example command for running the test:
+```bash
 lein run test \
     --nodes-file ~/ydb-nodes.txt \
     --db-name /your/db/name \
@@ -25,7 +29,12 @@ lein run test \
     --max-txn-length 4 \
     --batch-ops-probability 0.85 \
     --batch-commit-probability 0.5 \
-    --ballast-size 1024
+    --ballast-size 1024 \
+    --store-type row
+```
+7. Run http server for observe results:
+```bash
+lein run serve -p 9000
 ```
 
 ## License

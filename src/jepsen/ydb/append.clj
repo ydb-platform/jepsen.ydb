@@ -103,20 +103,22 @@
   (info "creating initial tables")
   (conn/with-session [session table-client]
     (let [query (format "CREATE TABLE `%1$s` (
-                             key Int64,
-                             index Int64,
+                             key Int64 NOT NULL,
+                             index Int64 NOT NULL,
                              value Int64,
                              ballast string,
                              PRIMARY KEY (key, index))
                          WITH (%3$s
                                %4$s
+                               STORE = %5$s,
                                AUTO_PARTITIONING_BY_SIZE = ENABLED,
                                AUTO_PARTITIONING_BY_LOAD = ENABLED,
                                AUTO_PARTITIONING_PARTITION_SIZE_MB = %2$d);"
                         (:db-table test)
                         (:partition-size-mb test)
                         (generate-partition-at-keys test)
-                        (generate-read-replicas-settings test))]
+                        (generate-read-replicas-settings test)
+                        (:store-type test))]
       (conn/execute-scheme! session query)
       (when (:with-changefeed test)
         (let [query (format "ALTER TABLE `%1$s`
@@ -171,8 +173,8 @@
   (format "DECLARE $key AS Int64;
            DECLARE $value AS Int64;
            DECLARE $ballast AS Bytes;
-           $next_index = (SELECT COALESCE(MAX(index) + 1, 0) FROM `%1$s` WHERE key = $key);
-           UPSERT INTO `%1$s` (key, index, value, ballast) VALUES ($key, $next_index, $value, $ballast);"
+           $next_index = (SELECT MAX(index) + 1 FROM `%1$s` WHERE key = $key);
+           UPSERT INTO `%1$s` (key, index, value, ballast) VALUES ($key, COALESCE($next_index, 0), $value, $ballast);"
           (:db-table test)))
 
 (defn execute-list-append
@@ -235,8 +237,8 @@
        "    GROUP BY w.key\n"
        ");\n"
        "UPSERT INTO `" (:db-table test) "` (\n"
-       "    SELECT w.key AS key,\n"
-       "           COALESCE(li.index + 1, 0) + w.index AS index,\n"
+       "    SELECT COALESCE(w.key, 0) AS key,\n"
+       "           COALESCE(li.index + 1 + w.index, 0) AS index,\n"
        "           w.value AS value,\n"
        "           " ballast-param " AS ballast\n"
        "    FROM AS_TABLE(" write-param ") AS w\n"

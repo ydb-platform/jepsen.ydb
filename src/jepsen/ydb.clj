@@ -189,7 +189,10 @@
    [nil "--nemesis-interval SECS" "Roughly how long between nemesis operations."
     :default 5
     :parse-fn read-string
-    :validate [pos? "Must be a positive number."]]])
+    :validate [pos? "Must be a positive number."]]
+
+   [nil "--store-type TYPE" "Store type, can be 'row' or 'column'"
+    :default "row"]])
 
 (defn -main
   "Handles command line arguments."
