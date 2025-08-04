@@ -103,21 +103,23 @@
   (info "creating initial tables")
   (conn/with-session [session table-client]
     (let [query (format "CREATE TABLE `%1$s` (
-                             key Int64,
-                             version Int64,
-                             index Int64,
+                             key Int64 NOT NULL,
+                             version Int64 NOT NULL,
+                             index Int64 NOT NULL,
                              value Int64,
                              ballast string,
                              PRIMARY KEY (key, version, index))
                          WITH (%3$s
                                %4$s
+                               STORE = %5$s,
                                AUTO_PARTITIONING_BY_SIZE = ENABLED,
                                AUTO_PARTITIONING_BY_LOAD = ENABLED,
                                AUTO_PARTITIONING_PARTITION_SIZE_MB = %2$d);"
                         (:db-table test)
                         (:partition-size-mb test)
                         (generate-partition-at-keys test)
-                        (generate-read-replicas-settings test))]
+                        (generate-read-replicas-settings test)
+                        (:store-type test))]
       (conn/execute-scheme! session query)
       (when (:with-changefeed test)
         (let [query (format "ALTER TABLE `%1$s`
