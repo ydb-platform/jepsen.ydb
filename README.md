@@ -17,7 +17,7 @@ export JAVA_CMD=$HOME/jdk-21.0.8+9/bin/java
 4. Download [lein](https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein) to `/usr/local/bin/`
 5. Create a `~/ydb-nodes.txt` file that lists your YDB cluster nodes.
 
-6. For column shard tables have to enable data query in YDB config:
+6. To test column shard tables, you need to enable data query in YDB config by setting:
 ```yaml
 table_service_config:
     allow_olap_data_query: true
