@@ -9,15 +9,21 @@ A command line utility for testing YDB with Jepsen.
 ## Usage
 
 1. Install `gnuplot-nox` and `graphviz` packages at the control node.
-2. Install JDK (arcadia one is too old), for example [adoptium](https://adoptium.net/temurin).
+2. Install JDK. Default one in ydb repository  is too old. JDK 21 is recomended, for example [adoptium](https://adoptium.net/temurin).
 3. Set `JAVA_CMD` env:
 ```bash
-export JAVA_CMD=/home/iddqd/tmp/jdk-21.0.8+9/bin/java
+export JAVA_CMD=$HOME/jdk-21.0.8+9/bin/java
 ```
-4. Download [lean](https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein) to `/usr/local/bin/`
+4. Download [lein](https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein) to `/usr/local/bin/`
 5. Create a `~/ydb-nodes.txt` file that lists your YDB cluster nodes.
 
-6. Example command for running the test:
+6. For column shard tables have to enable data query in YDB config:
+```yaml
+table_service_config:
+    allow_olap_data_query: true
+```
+
+7. Example command for running the test:
 ```bash
 lein run test \
     --nodes-file ~/ydb-nodes.txt \
@@ -32,7 +38,7 @@ lein run test \
     --ballast-size 1024 \
     --store-type row
 ```
-7. Run http server for observe results:
+8. Run http server for observe results:
 ```bash
 lein run serve -p 9000
 ```
