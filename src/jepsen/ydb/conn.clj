@@ -2,17 +2,13 @@
   (:require [clojure.tools.logging :refer [info]]
             [jepsen.ydb.debug-info :as debug-info])
   (:import (java.time Duration)
+           (tech.ydb.common.transaction TxMode)
            (tech.ydb.core StatusCode)
            (tech.ydb.core UnexpectedResultException)
            (tech.ydb.core.grpc GrpcTransport)
-           (tech.ydb.table TableClient)
-           (tech.ydb.table.query Params)
-           (tech.ydb.table.settings BeginTxSettings)
-           (tech.ydb.table.settings CommitTxSettings)
-           (tech.ydb.table.settings RollbackTxSettings)
-           (tech.ydb.table.settings ExecuteSchemeQuerySettings)
-           (tech.ydb.table.transaction Transaction$Mode)
-           (tech.ydb.table.transaction TxControl)))
+           (tech.ydb.query QueryClient)
+           (tech.ydb.query.tools QueryReader)
+           (tech.ydb.table.query Params)))
 
 (defn open-transport
   "Opens a new grpc transport using the specified test and node"
@@ -22,16 +18,16 @@
     (-> (GrpcTransport/forConnectionString conn-string)
         .build)))
 
-(defn open-table-client
-  "Opens a new table client using the specified transport"
+(defn open-query-client
+  "Opens a new query client using the specified transport"
   [transport]
-  (-> (TableClient/newClient transport)
+  (-> (QueryClient/newClient transport)
       .build))
 
 (defn open-session
   "Opens a YDB session using the specified table client"
-  [table-client]
-  (-> table-client
+  [query-client]
+  (-> query-client
       (.createSession (Duration/ofSeconds 5))
       .join
       .getValue))
@@ -39,11 +35,11 @@
 (defmacro with-session
   "Wraps code block, opening session before the start and closing it before leaving.
 
-   (with-session [session table-client]
+   (with-session [session query-client]
      ... use session)"
   {:clj-kondo/lint-as 'clojure.core/let}
-  [[session-name table-client] & body]
-  `(with-open [~session-name (open-session ~table-client)]
+  [[session-name query-client] & body]
+  `(with-open [~session-name (open-session ~query-client)]
      ;(info "opened session" (.getId ~session-name))
      (let [r# (do ~@body)]
        r#)))
@@ -69,20 +65,12 @@
   (rollback! [this]
     "Explicitly rollback the transaction. Doesn't throw on failure. No-op when transaction is not open."))
 
-(defn tx-control-for-execute
-  "Returns TxControl object for execute! based on currently known tx-id and commit."
-  [tx-id commit]
-  (-> (if (= tx-id nil)
-        (TxControl/serializableRw)
-        (TxControl/id tx-id))
-      (.setCommitTx commit)))
-
 (defn handle-debug-info
   "Handle debug info in the result (when present)"
   [result]
-  (when (-> result .hasQueryStats)
+  (when (-> result .getQueryInfo .hasStats)
     ; When present debug info is temporarily passed in the ast field with a special prefix
-    (let [ast (-> result .getQueryStats .getQueryAst)
+    (let [ast (-> result .getQueryInfo .getStats .getQueryAst)
           debug-info-prefix "debug-info:"]
       (when (. ast startsWith debug-info-prefix)
         (let [chunk (. ast substring (.length debug-info-prefix))
@@ -92,20 +80,19 @@
 (def commit-via-select-1? true)
 
 (deftype Transaction [session
-                      ^:unsynchronized-mutable tx-id
+                      ^:unsynchronized-mutable tx
                       ^:unsynchronized-mutable auto-commit]
   ITransaction
   (current-tx-id [this]
-    tx-id)
+    (-> tx .getId))
 
   (begin! [this]
-    (assert (= tx-id nil) "Transaction is already in progress")
+    (assert (= tx nil) "Transaction is already in progress")
     (assert (= auto-commit false) "Cannot begin new transaction after the call to auto-commit!")
-    (let [tx (-> session
-                 (.beginTransaction Transaction$Mode/SERIALIZABLE_READ_WRITE (BeginTxSettings.))
+    (set! tx (-> session
+                 (.beginTransaction TxMode/SERIALIZABLE_RW)
                  .join
-                 .getValue)]
-      (set! tx-id (.getId tx))))
+                 .getValue)))
 
   (auto-commit! [this]
     (set! auto-commit true))
@@ -114,23 +101,19 @@
     ;(info "executing tx query:" query "in tx" (id this) (if auto-commit "with auto commit" nil))
     (let [was-auto-commit auto-commit
           _ (set! auto-commit false)
-          tx-control (tx-control-for-execute tx-id was-auto-commit)
-          result (-> session
-                     (.executeDataQuery query tx-control params)
-                     .join
-                     .getValue)]
+          stream (if (= tx nil)
+                       (-> session (.createQuery query TxMode/SERIALIZABLE_RW params))
+                       (-> tx (.createQuery was-auto-commit query params)))
+          result (-> (QueryReader/readFrom stream) .join .getValue)]
       (if was-auto-commit
-        ; Clear tx-id when we successfully commit implicitly
-        (set! tx-id nil)
-        ; Otherwise remember tx-id when we start a new transaction
-        (when (= tx-id nil)
-          (set! tx-id (.getTxId result))))
+        ; Clear tx when we successfully commit implicitly
+        (set! tx nil))
       (handle-debug-info result)
       result))
 
   (commit! [this]
     (assert (= auto-commit false) "Cannot commit transaction after the call to auto-commit!")
-    (when (not (= tx-id nil))
+    (when (not (= tx nil))
       (if commit-via-select-1?
         (do
           ; Perform SELECT 1 with auto commit to gather debug-info
@@ -138,19 +121,18 @@
           (execute! this "SELECT 1" (Params/empty))
           nil)
         (do
-          (-> session
-              (.commitTransaction tx-id (CommitTxSettings.))
+          (-> tx
+              .commit
               .join
+              .getStatus
               .expectSuccess)
-          (set! tx-id nil)))))
+          (set! tx nil)))))
 
   (rollback! [this]
     (set! auto-commit false)
-    (when (not (= tx-id nil))
-      (-> session
-          (.rollbackTransaction tx-id (RollbackTxSettings.))
-          .join)
-      (set! tx-id nil))))
+    (when (not (= tx nil))
+      (-> tx .rollback .join)
+      (set! tx nil))))
 
 (defn open-transaction
   "Returns a new Transaction object using the specified session"
@@ -181,8 +163,10 @@
   [session query]
   ;(info "executing scheme query:" query)
   (-> session
-      (.executeSchemeQuery query (ExecuteSchemeQuerySettings.))
+      (.createQuery query TxMode/NONE)
+      .execute
       .join
+      .getStatus
       .expectSuccess))
 
 (defmacro with-errors
