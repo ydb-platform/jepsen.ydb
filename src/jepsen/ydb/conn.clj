@@ -7,6 +7,7 @@
            (tech.ydb.core UnexpectedResultException)
            (tech.ydb.core.grpc GrpcTransport)
            (tech.ydb.query QueryClient)
+           (tech.ydb.query.settings ExecuteQuerySettings)
            (tech.ydb.query.tools QueryReader)
            (tech.ydb.table.query Params)))
 
@@ -98,14 +99,16 @@
     (set! auto-commit true))
 
   (execute! [this query params]
+    (if (and (not auto-commit) (= tx nil))
+      (set! tx (-> session (.createNewTransaction TxMode/SERIALIZABLE_RW))))
     ;(info "executing tx query:" query "in tx" (id this) (if auto-commit "with auto commit" nil))
-    (let [was-auto-commit auto-commit
-          _ (set! auto-commit false)
+    (let [
           stream (if (= tx nil)
                        (-> session (.createQuery query TxMode/SERIALIZABLE_RW params))
-                       (-> tx (.createQuery was-auto-commit query params)))
+                       (-> tx (.createQuery query auto-commit params (-> (ExecuteQuerySettings/newBuilder) .build))))
+          _ (set! auto-commit false)
           result (-> (QueryReader/readFrom stream) .join .getValue)]
-      (if was-auto-commit
+      (if (and (not (= tx nil)) (not (-> tx .isActive)))
         ; Clear tx when we successfully commit implicitly
         (set! tx nil))
       (handle-debug-info result)
