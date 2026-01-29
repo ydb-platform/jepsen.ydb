@@ -6,8 +6,8 @@
   :dependencies [[org.clojure/clojure "1.11.1"]
                  [org.clojure/data.json "2.5.0"]
                  [jepsen "0.3.5"]
-                 [tech.ydb/ydb-sdk-scheme "2.1.11"]
-                 [tech.ydb/ydb-sdk-table "2.1.11"]]
+                 [tech.ydb/ydb-sdk-scheme "2.3.29"]
+                 [tech.ydb/ydb-sdk-table "2.3.29"]]
   :profiles {:uberjar {:aot :all}}
   :main jepsen.ydb
   :jvm-opts ["-Djava.awt.headless=true"
