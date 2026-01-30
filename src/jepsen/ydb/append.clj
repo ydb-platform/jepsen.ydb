@@ -33,10 +33,10 @@
   `(locking ~atomic-bool
      (when (compare-and-set! ~atomic-bool false true) ~@body)))
 
-(defn drop-initial-tables-post-24-1
-  [test table-client]
+(defn db-drop-table-if-exists
+  [test query-client]
   (info "dropping initial tables")
-  (conn/with-session [session table-client]
+  (conn/with-session [session query-client]
     (let [query (format "DROP TABLE IF EXISTS `%1$s`;" (:db-table test))]
       (conn/execute-scheme! session query))))
 
@@ -52,30 +52,11 @@
     (some is-issue-db-path-not-found? (.getIssues status))
     nil))
 
-(defn db-table-exists
-  [test session table-name]
-  (let [table-path (str (:db-name test) "/" table-name)
-        result (-> session
-                   (.describeTable table-path)
-                   .join)
-        status (.getStatus result)]
-    (when-not (is-status-db-path-not-found? status)
-      (.expectSuccess status))))
-
-(defn db-drop-table-if-exists
-  [test session table-name]
-  (let [table-path (str (:db-name test) "/" table-name)
-        status (-> session
-                   (.dropTable table-path)
-                   .join)]
-    (when-not (is-status-db-path-not-found? status)
-      (.expectSuccess status))))
 
 (defn drop-initial-tables
-  [test table-client]
+  [test query-client]
   (info "dropping initial tables")
-  (conn/with-session [session table-client]
-    (db-drop-table-if-exists test session (:db-table test))))
+  (db-drop-table-if-exists test query-client))
 
 (defn generate-partition-at-keys
   "Generates an optional PARTITION_AT_KEYS fragment with a list of partitioning keys"
@@ -99,9 +80,9 @@
       "")))
 
 (defn create-initial-tables
-  [test table-client]
+  [test query-client]
   (info "creating initial tables")
-  (conn/with-session [session table-client]
+  (conn/with-session [session query-client]
     (let [query (format "CREATE TABLE `%1$s` (
                              key Int64 NOT NULL,
                              index Int64 NOT NULL,
@@ -367,25 +348,25 @@
               (conn/auto-commit! tx)
               (apply-mop! test tx v))))
 
-(defrecord Client [transport table-client ballast setup?]
+(defrecord Client [transport query-client ballast setup?]
   client/Client
   (open! [this test node]
     (let [transport (conn/open-transport test node)
-          table-client (conn/open-table-client transport)]
-      (assoc this :transport transport :table-client table-client)))
+          query-client (conn/open-query-client transport)]
+      (assoc this :transport transport :query-client query-client)))
 
   (setup! [this test]
     (once-per-cluster
      setup?
-     (drop-initial-tables test table-client)
-     (create-initial-tables test table-client)))
+     (drop-initial-tables test query-client)
+     (create-initial-tables test query-client)))
 
   (invoke! [_ test op]
     ;; (info "processing op:" op)
     (with-ballast ballast
       (debug-info/with-debug-info
         (conn/with-errors op
-          (conn/with-session [session table-client]
+          (conn/with-session [session query-client]
             (conn/with-transaction [tx session]
               (let [txn (:value op)
                     ; modified transaction we are going to execute
@@ -404,7 +385,7 @@
   (teardown! [this test])
 
   (close! [this test]
-    (.close table-client)
+    (.close query-client)
     (.close transport)))
 
 (defn new-client
