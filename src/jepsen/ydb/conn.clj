@@ -85,7 +85,9 @@
                       ^:unsynchronized-mutable auto-commit]
   ITransaction
   (current-tx-id [this]
-    (-> tx .getId))
+    (if (not (= tx nil))
+      (.getId tx)
+      nil))
 
   (begin! [this]
     (assert (= tx nil) "Transaction is already in progress")
@@ -99,16 +101,16 @@
     (set! auto-commit true))
 
   (execute! [this query params]
-    (if (and (not auto-commit) (= tx nil))
+    (when (and (not auto-commit) (= tx nil))
       (set! tx (-> session (.createNewTransaction TxMode/SERIALIZABLE_RW))))
-    ;(info "executing tx query:" query "in tx" (id this) (if auto-commit "with auto commit" nil))
+    ;; (info "executing tx query:" query "in tx" (current-tx-id this) (if auto-commit "with auto commit" ""))
     (let [
           stream (if (= tx nil)
                        (-> session (.createQuery query TxMode/SERIALIZABLE_RW params))
                        (-> tx (.createQuery query auto-commit params (-> (ExecuteQuerySettings/newBuilder) .build))))
           _ (set! auto-commit false)
           result (-> (QueryReader/readFrom stream) .join .getValue)]
-      (if (and (not (= tx nil)) (not (-> tx .isActive)))
+      (when (and (not (= tx nil)) (not (-> tx .isActive)))
         ; Clear tx when we successfully commit implicitly
         (set! tx nil))
       (handle-debug-info result)

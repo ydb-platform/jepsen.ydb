@@ -33,30 +33,12 @@
   `(locking ~atomic-bool
      (when (compare-and-set! ~atomic-bool false true) ~@body)))
 
-(defn db-drop-table-if-exists
+(defn drop-initial-tables
   [test query-client]
   (info "dropping initial tables")
   (conn/with-session [session query-client]
     (let [query (format "DROP TABLE IF EXISTS `%1$s`;" (:db-table test))]
       (conn/execute-scheme! session query))))
-
-(defn is-issue-db-path-not-found?
-  [issue]
-  (let [message (.getMessage issue)]
-    (or (.contains message "Path does not exist")
-        (some is-issue-db-path-not-found? (.getIssues issue)))))
-
-(defn is-status-db-path-not-found?
-  [status]
-  (if (= StatusCode/SCHEME_ERROR (.getCode status))
-    (some is-issue-db-path-not-found? (.getIssues status))
-    nil))
-
-
-(defn drop-initial-tables
-  [test query-client]
-  (info "dropping initial tables")
-  (db-drop-table-if-exists test query-client))
 
 (defn generate-partition-at-keys
   "Generates an optional PARTITION_AT_KEYS fragment with a list of partitioning keys"

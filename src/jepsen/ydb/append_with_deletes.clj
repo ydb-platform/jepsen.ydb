@@ -33,49 +33,12 @@
   `(locking ~atomic-bool
      (when (compare-and-set! ~atomic-bool false true) ~@body)))
 
-(defn drop-initial-tables-post-24-1
+(defn drop-initial-tables
   [test query-client]
   (info "dropping initial tables")
   (conn/with-session [session query-client]
     (let [query (format "DROP TABLE IF EXISTS `%1$s`;" (:db-table test))]
       (conn/execute-scheme! session query))))
-
-(defn is-issue-db-path-not-found?
-  [issue]
-  (let [message (.getMessage issue)]
-    (or (.contains message "Path does not exist")
-        (some is-issue-db-path-not-found? (.getIssues issue)))))
-
-(defn is-status-db-path-not-found?
-  [status]
-  (if (= StatusCode/SCHEME_ERROR (.getCode status))
-    (some is-issue-db-path-not-found? (.getIssues status))
-    nil))
-
-(defn db-table-exists
-  [test session table-name]
-  (let [table-path (str (:db-name test) "/" table-name)
-        result (-> session
-                   (.describeTable table-path)
-                   .join)
-        status (.getStatus result)]
-    (when-not (is-status-db-path-not-found? status)
-      (.expectSuccess status))))
-
-(defn db-drop-table-if-exists
-  [test session table-name]
-  (let [table-path (str (:db-name test) "/" table-name)
-        status (-> session
-                   (.dropTable table-path)
-                   .join)]
-    (when-not (is-status-db-path-not-found? status)
-      (.expectSuccess status))))
-
-(defn drop-initial-tables
-  [test query-client]
-  (info "dropping initial tables")
-  (conn/with-session [session query-client]
-    (db-drop-table-if-exists test session (:db-table test))))
 
 (defn generate-partition-at-keys
   "Generates an optional PARTITION_AT_KEYS fragment with a list of partitioning keys"
@@ -175,9 +138,11 @@
            DECLARE $value AS Int64;
            DECLARE $ballast AS Bytes;
            $prev_state = (SELECT version, index, value FROM `%1$s` WHERE key = $key);
-           $prev_version = (SELECT COALESCE(MAX(version), 0) FROM $prev_state);
+           $prev_version_optional = (SELECT MAX(version) FROM $prev_state);
+           $prev_version = COALESCE($prev_version_optional, 0);
            $next_version = $prev_version + 1;
-           $next_index = (SELECT COALESCE(MAX(index) + 1, 0) FROM $prev_state);
+           $next_index_optional = (SELECT MAX(index) + 1 FROM $prev_state);
+           $next_index = COALESCE($next_index_optional, 0);
            DELETE FROM `%1$s` WHERE key = $key AND version = $prev_version;
            UPSERT INTO `%1$s`
                SELECT $key AS key, $next_version AS version, index, value, $ballast AS ballast FROM $prev_state
