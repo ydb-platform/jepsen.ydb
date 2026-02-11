@@ -61,27 +61,58 @@
       (format "READ_REPLICAS_SETTINGS = \"PER_AZ:%s\"," count)
       "")))
 
+(defn generate-create-table-key-index
+  [test]
+  (format "CREATE TABLE `%1$s` (
+               key Int64 NOT NULL,
+               index Int64 NOT NULL,
+               value Int64,
+               ballast string,
+               PRIMARY KEY (key, index))
+           WITH (%3$s
+                 %4$s
+                 STORE = %5$s,
+                 AUTO_PARTITIONING_BY_SIZE = ENABLED,
+                 AUTO_PARTITIONING_BY_LOAD = ENABLED,
+                 AUTO_PARTITIONING_PARTITION_SIZE_MB = %2$d);"
+          (:db-table test)
+          (:partition-size-mb test)
+          (generate-partition-at-keys test)
+          (generate-read-replicas-settings test)
+          (:store-type test)))
+
+(defn generate-create-table-key-index-opindex
+  [test]
+  (format "CREATE TABLE `%1$s` (
+                 key Int64 NOT NULL,
+                 index Int64 NOT NULL,
+                 opindex Int64 NOT NULL,
+                 value Int64,
+                 ballast string,
+                 PRIMARY KEY (key, index, opindex))
+             WITH (%3$s
+                   %4$s
+                   STORE = %5$s,
+                   AUTO_PARTITIONING_BY_SIZE = ENABLED,
+                   AUTO_PARTITIONING_BY_LOAD = ENABLED,
+                   AUTO_PARTITIONING_PARTITION_SIZE_MB = %2$d);"
+          (:db-table test)
+          (:partition-size-mb test)
+          (generate-partition-at-keys test)
+          (generate-read-replicas-settings test)
+          (:store-type test)))
+
+(defn generate-create-table
+  [test]
+  (if (:with-opindex test)
+    (generate-create-table-key-index-opindex test)
+    (generate-create-table-key-index test)))
+
 (defn create-initial-tables
   [test query-client]
   (info "creating initial tables")
   (conn/with-session [session query-client]
-    (let [query (format "CREATE TABLE `%1$s` (
-                             key Int64 NOT NULL,
-                             index Int64 NOT NULL,
-                             value Int64,
-                             ballast string,
-                             PRIMARY KEY (key, index))
-                         WITH (%3$s
-                               %4$s
-                               STORE = %5$s,
-                               AUTO_PARTITIONING_BY_SIZE = ENABLED,
-                               AUTO_PARTITIONING_BY_LOAD = ENABLED,
-                               AUTO_PARTITIONING_PARTITION_SIZE_MB = %2$d);"
-                        (:db-table test)
-                        (:partition-size-mb test)
-                        (generate-partition-at-keys test)
-                        (generate-read-replicas-settings test)
-                        (:store-type test))]
+    (let [query (generate-create-table test)]
       (conn/execute-scheme! session query)
       (when (:with-changefeed test)
         (let [query (format "ALTER TABLE `%1$s`
@@ -131,7 +162,7 @@
         query-result (conn/execute! tx query params)]
     (parse-list-read-result (. query-result getResultSet 0) k)))
 
-(defn list-append-query
+(defn list-append-query-simple
   [test]
   (format "DECLARE $key AS Int64;
            DECLARE $value AS Int64;
@@ -140,13 +171,38 @@
            UPSERT INTO `%1$s` (key, index, value, ballast) VALUES ($key, COALESCE($next_index, 0), $value, $ballast);"
           (:db-table test)))
 
-(defn execute-list-append
+(defn execute-list-append-simple
   [test tx k v]
-  (let [query (list-append-query test)
+  (let [query (list-append-query-simple test)
         params (Params/of "$key" (PrimitiveValue/newInt64 k)
                           "$value" (PrimitiveValue/newInt64 v)
                           "$ballast" (PrimitiveValue/newBytes *ballast*))]
     (conn/execute! tx query params)))
+
+(defn list-append-query-opindex
+  [test]
+  (format "DECLARE $key AS Int64;
+           DECLARE $value AS Int64;
+           DECLARE $opindex AS Int64;
+           DECLARE $ballast AS Bytes;
+           $next_index = (SELECT MAX(index) + 1 FROM `%1$s` WHERE key = $key);
+           UPSERT INTO `%1$s` (key, index, opindex, value, ballast) VALUES ($key, COALESCE($next_index, 0), $opindex, $value, $ballast);"
+          (:db-table test)))
+
+(defn execute-list-append-opindex
+  [test tx opindex k v]
+  (let [query (list-append-query-opindex test)
+        params (Params/of "$key" (PrimitiveValue/newInt64 k)
+                          "$value" (PrimitiveValue/newInt64 v)
+                          "$opindex" (PrimitiveValue/newInt64 opindex)
+                          "$ballast" (PrimitiveValue/newBytes *ballast*))]
+    (conn/execute! tx query params)))
+
+(defn execute-list-append
+  [test tx opindex k v]
+  (if (:with-opindex test)
+    (execute-list-append-opindex test tx opindex k v)
+    (execute-list-append-simple test tx k v)))
 
 (defn mops->multi-ops
   "Given a series of micro-ops returns a [multi-ops rs-map] tuple."
@@ -190,8 +246,14 @@
   [write-param]
   (str "DECLARE " write-param " AS List<Struct<key:Int64, index:Int64, value:Int64>>;\n"))
 
+(defn multi-ops-write-opindex-fragment
+  [test opindex-param]
+  (if (:with-opindex test)
+    (str "           " opindex-param " AS opindex,\n")
+    ""))
+
 (defn multi-ops-write-fragment
-  [test write-param ballast-param]
+  [test write-param ballast-param opindex-param]
   (str write-param "_keys = (SELECT DISTINCT(key) FROM AS_TABLE(" write-param "));\n"
        write-param "_last_index = (\n"
        "    SELECT w.key AS key, MAX(t.index) AS index\n"
@@ -202,6 +264,7 @@
        "UPSERT INTO `" (:db-table test) "` (\n"
        "    SELECT w.key AS key,\n"
        "           COALESCE(li.index + 1, 0) + w.index AS index,\n"
+       (multi-ops-write-opindex-fragment test opindex-param)
        "           w.value AS value,\n"
        "           " ballast-param " AS ballast\n"
        "    FROM AS_TABLE(" write-param ") AS w\n"
@@ -220,12 +283,13 @@
 
 (defn multi-ops->query
   "Transforms multi-ops to [query, params] tuple, ready to be executed."
-  [test multi-ops]
+  [test opindex multi-ops]
   (let [declares (volatile! (transient []))
         fragments (volatile! (transient []))
         read-index (volatile! 0)
         write-index (volatile! 0)
         ballast-param "$ballast"
+        opindex-param "$opindex"
         params (Params/create)]
     (doseq [[f v] multi-ops]
       (case f
@@ -239,20 +303,23 @@
                       _ (vswap! write-index inc)
                       write-param (str "$write" index)]
                   (vswap! declares conj! (multi-ops-write-declare write-param))
-                  (vswap! fragments conj! (multi-ops-write-fragment test write-param ballast-param))
+                  (vswap! fragments conj! (multi-ops-write-fragment test write-param ballast-param opindex-param))
                   (. params put write-param (multi-ops-write-value v)))))
     (when (> @write-index 0)
       (vswap! declares conj! (str "DECLARE " ballast-param " AS Bytes;\n"))
-      (. params put ballast-param (PrimitiveValue/newBytes *ballast*)))
+      (. params put ballast-param (PrimitiveValue/newBytes *ballast*))
+      (when (:with-opindex test)
+        (vswap! declares conj! (str "DECLARE " opindex-param " AS Int64;\n"))
+        (. params put opindex-param (PrimitiveValue/newInt64 opindex))))
     [(apply str (concat (persistent! @declares)
                         (persistent! @fragments)))
      params]))
 
 (defn execute-list-batch
   "Executes a sequence of micro-ops as a single batch query."
-  [test tx mops]
+  [test tx opindex mops]
   (let [[multi-ops rs-map] (mops->multi-ops mops)
-        [query params] (multi-ops->query test multi-ops)
+        [query params] (multi-ops->query test opindex multi-ops)
         query-result (conn/execute! tx query params)
         result (mapv (fn [[f k _ :as mop] rs-index]
                        (case f
@@ -319,16 +386,16 @@
    (sequence (batch-commit-last test) coll)))
 
 (defn apply-mop!
-  [test tx [f k v :as mop]]
+  [test tx opindex [f k v :as mop]]
   (case f
     :r [[f k (execute-list-read test tx k)]]
     :append [(do
-               (execute-list-append test tx k v)
+               (execute-list-append test tx opindex k v)
                mop)]
-    :batch (execute-list-batch test tx v)
+    :batch (execute-list-batch test tx opindex v)
     :commit (do
               (conn/auto-commit! tx)
-              (apply-mop! test tx v))))
+              (apply-mop! test tx opindex v))))
 
 (defrecord Client [transport query-client ballast setup?]
   client/Client
@@ -359,7 +426,7 @@
                     op' (if (not= txn txn') (assoc op :modified-txn txn') op)
                     ; execute modified transaction and gather results
                     txn'' (->> txn'
-                               (mapcat (partial apply-mop! test tx))
+                               (mapcat (partial apply-mop! test tx (:index op)))
                                (into []))
                     op'' (assoc op' :type :ok, :value txn'')]
                 op'')))))))

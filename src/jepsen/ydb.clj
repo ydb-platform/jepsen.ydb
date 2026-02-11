@@ -139,6 +139,9 @@
     :parse-fn parse-long
     :validate [valid-read-replicas? "Must a 0 or greater"]]
 
+   [nil "--with-opindex" "Use an additional opindex column for serializable tests"
+    :default false]
+
    [nil "--with-changefeed" "Additional updates changefeed for the YDB table"
     :default false]
 
