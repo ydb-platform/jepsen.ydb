@@ -416,7 +416,7 @@
       (debug-info/with-debug-info
         (conn/with-errors op
           (conn/with-session [session query-client]
-            (conn/with-transaction [tx session]
+            (conn/with-transaction [tx [session (:model test)]]
               (let [txn (:value op)
                     ; modified transaction we are going to execute
                     txn' (->> txn
@@ -448,5 +448,5 @@
                                               :min-txn-length
                                               :max-txn-length
                                               :max-writes-per-key])
-                           :consistency-models [:ydb-serializable])))
+                           :consistency-models [(:model opts)])))
       (assoc :client (new-client opts))))

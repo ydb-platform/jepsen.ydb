@@ -116,6 +116,10 @@
    [nil "--workload-name NAME" "YDB workload name to test."
     :default "append"]
 
+   [nil "--model MODEL" "YDB consistency model to check."
+    :default :ydb-serializable
+    :parse-fn keyword]
+
    [nil "--allow-exceptions" "Relaxes the test to allow unhandled exceptions."
     :default false]
 

@@ -80,7 +80,14 @@
 
 (def commit-via-select-1? true)
 
-(deftype Transaction [session
+(defn model-to-tx-mode
+  "Converts model to transaction mode"
+  [model]
+  (case model
+    :ydb-serializable TxMode/SERIALIZABLE_RW
+    :snapshot-isolation TxMode/SNAPSHOT_RW))
+
+(deftype Transaction [session mode
                       ^:unsynchronized-mutable tx
                       ^:unsynchronized-mutable auto-commit]
   ITransaction
@@ -93,7 +100,7 @@
     (assert (= tx nil) "Transaction is already in progress")
     (assert (= auto-commit false) "Cannot begin new transaction after the call to auto-commit!")
     (set! tx (-> session
-                 (.beginTransaction TxMode/SERIALIZABLE_RW)
+                 (.beginTransaction mode)
                  .join
                  .getValue)))
 
@@ -102,11 +109,11 @@
 
   (execute! [this query params]
     (when (and (not auto-commit) (= tx nil))
-      (set! tx (-> session (.createNewTransaction TxMode/SERIALIZABLE_RW))))
+      (set! tx (-> session (.createNewTransaction mode))))
     ;; (info "executing tx query:" query "in tx" (current-tx-id this) (if auto-commit "with auto commit" ""))
     (let [
           stream (if (= tx nil)
-                       (-> session (.createQuery query TxMode/SERIALIZABLE_RW params))
+                       (-> session (.createQuery query mode params))
                        (-> tx (.createQuery query auto-commit params (-> (ExecuteQuerySettings/newBuilder) .build))))
           _ (set! auto-commit false)
           result (-> (QueryReader/readFrom stream) .join .getValue)]
@@ -141,17 +148,17 @@
 
 (defn open-transaction
   "Returns a new Transaction object using the specified session"
-  [session]
-  (Transaction. session nil false))
+  [session model]
+  (Transaction. session (model-to-tx-mode model) nil false))
 
 (defmacro with-transaction
   "Wraps a code block with a Transaction object, which will be committed on success or rolled back on exception.
 
-   (with-transaction [tx session]
+   (with-transaction [tx [session model]]
      ... use tx object)"
   {:clj-kondo/lint-as 'clojure.core/let}
-  [[tx-name session] & body]
-  `(let [~tx-name (open-transaction ~session)]
+  [[tx-name [session model]] & body]
+  `(let [~tx-name (open-transaction ~session ~model)]
      ;(info "opened transaction" (.getId ~tx-name))
      (try
        (let [r# (do ~@body)]
