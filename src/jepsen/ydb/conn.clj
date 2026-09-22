@@ -9,7 +9,8 @@
            (tech.ydb.query QueryClient)
            (tech.ydb.query.settings ExecuteQuerySettings)
            (tech.ydb.query.tools QueryReader)
-           (tech.ydb.table.query Params)))
+           (tech.ydb.table.query Params)
+           (tech.ydb.topic TopicClient)))
 
 (defn open-transport
   "Opens a new grpc transport using the specified test and node"
@@ -23,6 +24,12 @@
   "Opens a new query client using the specified transport"
   [transport]
   (-> (QueryClient/newClient transport)
+      .build))
+
+(defn open-topic-client
+  "Opens a new topic client using the specified transport"
+  [transport]
+  (-> (TopicClient/newClient transport)
       .build))
 
 (defn open-session
@@ -53,6 +60,13 @@
 
   (begin! [this]
     "Explicitly begin the transaction, transaction must not be open yet.")
+
+  (ensure-tx! [this]
+    "Ensures a transaction is open on the server (beginning one via begin! when not
+     already open) and returns the raw tech.ydb.query.QueryTransaction object, active
+     and ready to be handed to APIs that need an already-active YdbTransaction handle
+     directly (e.g. topic writer/reader SendSettings/ReceiveSettings), rather than
+     going through execute!.")
 
   (auto-commit! [this]
     "Will cause the next execute! to atomically commit the transaction.")
@@ -104,6 +118,11 @@
                  (.beginTransaction mode)
                  .join
                  .getValue)))
+
+  (ensure-tx! [this]
+    (when (= tx nil)
+      (begin! this))
+    tx)
 
   (auto-commit! [this]
     (set! auto-commit true))

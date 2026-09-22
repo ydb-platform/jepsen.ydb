@@ -26,6 +26,8 @@ table_service_config:
 Please pay attention that some parameters are incompatible.
 
 - The `--with-opindex` option is only compatible with `--model ydb-serializable`.
+- The `--workload-name append-single-row-to-topic` workload requires `--model ydb-serializable`
+  (YDB topic transactions only support `SERIALIZABLE_RW`).
 
 
  Example command for running the test:
@@ -42,6 +44,23 @@ lein run test \
     --batch-commit-probability 0.5 \
     --ballast-size 1024 \
     --store-type row
+```
+
+Example command for running the topic-only workload (keys are hashed onto a fixed number of
+topic partitions, appends are written transactionally, reads are a full non-destructive replay):
+```bash
+lein run test \
+    --nodes-file ~/ydb-nodes.txt \
+    --db-name /your/db/name \
+    --no-ssh \
+    --concurrency 10n \
+    --workload-name append-single-row-to-topic \
+    --model ydb-serializable \
+    --topic-name jepsen_test_topic \
+    --topic-partition-count 30 \
+    --key-count 15 \
+    --max-writes-per-key 1000 \
+    --max-txn-length 4
 ```
 8. Run http server for observe results:
 ```bash

@@ -20,7 +20,8 @@
             [jepsen.ydb.cli.clean :refer [clean-valid-cmd]]
             [jepsen.ydb.append :as append]
             [jepsen.ydb.append-with-deletes :as append-with-deletes]
-            [jepsen.ydb.append-single-row :as append-single-row]))
+            [jepsen.ydb.append-single-row :as append-single-row]
+            [jepsen.ydb.append-single-row-to-topic :as append-single-row-to-topic]))
 
 (def dynamic-service "kikimr-multi@31003.service")
 (def storage-service "kikimr.service")
@@ -299,9 +300,10 @@
 
 (defn ydb-workload [opts]
   (case (:workload-name opts)
-    "append"              (append/workload opts)
-    "append-with-deletes" (append-with-deletes/workload opts)
-    "append-single-row"   (append-single-row/workload opts)))
+    "append"                       (append/workload opts)
+    "append-with-deletes"          (append-with-deletes/workload opts)
+    "append-single-row"            (append-single-row/workload opts)
+    "append-single-row-to-topic"   (append-single-row-to-topic/workload opts)))
 
 (defn ydb-unhandled-exceptions [opts]
   (let [wrapped (checker/unhandled-exceptions)]
@@ -322,6 +324,10 @@
              (not= (:model opts) :ydb-serializable))
     (throw (IllegalArgumentException.
              "--with-opindex can be used with --model ydb-serializable only")))
+  (when (and (= (:workload-name opts) "append-single-row-to-topic")
+             (not= (:model opts) :ydb-serializable))
+    (throw (IllegalArgumentException.
+             "--workload-name append-single-row-to-topic requires --model ydb-serializable (YDB topic transactions require SERIALIZABLE_RW)")))
   opts)
 
 (defn ydb-test [opts]
@@ -427,6 +433,10 @@
     :default 2135 :parse-fn parse-long :validate [pos? "Must be a positive integer"]]
    [nil "--db-table NAME"                "YDB table name."
     :default "jepsen_test"]
+   [nil "--topic-name NAME"              "YDB topic name (for topic workloads)."
+    :default "jepsen_test_topic"]
+   [nil "--topic-partition-count NUM"    "Fixed number of partitions for topic workloads. Keys are hashed onto these partitions, since the elle generator's key space is unbounded over the life of a test."
+    :default 30 :parse-fn parse-long :validate [pos? "Must be a positive integer"]]
    [nil "--workload-name NAME"           "YDB workload name."
     :default "append"]
    [nil "--model MODEL"                  "Consistency model to check."

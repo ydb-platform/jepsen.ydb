@@ -48,5 +48,20 @@
     (is (thrown-with-msg? IllegalArgumentException
                           #"with-opindex can be used with --model ydb-serializable only"
                           (ydb/validate-opts {:model :snapshot-isolation
-                                              :with-opindex true})))))
+                                              :with-opindex true}))))
+
+  (testing "Valid: append-single-row-to-topic with ydb-serializable"
+    (is (= {:model :ydb-serializable :workload-name "append-single-row-to-topic"}
+           (ydb/validate-opts {:model :ydb-serializable :workload-name "append-single-row-to-topic"}))))
+
+  (testing "Invalid: append-single-row-to-topic with snapshot-isolation"
+    (is (thrown-with-msg? IllegalArgumentException
+                          #"append-single-row-to-topic requires --model ydb-serializable"
+                          (ydb/validate-opts {:model :snapshot-isolation
+                                              :workload-name "append-single-row-to-topic"}))))
+
+  (testing "Invalid: append-single-row-to-topic without a model"
+    (is (thrown-with-msg? IllegalArgumentException
+                          #"append-single-row-to-topic requires --model ydb-serializable"
+                          (ydb/validate-opts {:workload-name "append-single-row-to-topic"})))))
 
