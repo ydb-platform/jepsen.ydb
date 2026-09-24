@@ -16,11 +16,13 @@
             [jepsen.net :as jepsen-net]
             [jepsen.net.proto :as net-proto]
             [jepsen.tests :as tests]
+            [jepsen.tests.kafka :as kafka]
             [jepsen.control.util :as cu]
             [jepsen.ydb.cli.clean :refer [clean-valid-cmd]]
             [jepsen.ydb.append :as append]
             [jepsen.ydb.append-with-deletes :as append-with-deletes]
-            [jepsen.ydb.append-single-row :as append-single-row]))
+            [jepsen.ydb.append-single-row :as append-single-row]
+            [jepsen.ydb.kafka-topic :as kafka-topic]))
 
 (def dynamic-service "kikimr-multi@31003.service")
 (def storage-service "kikimr.service")
@@ -301,7 +303,8 @@
   (case (:workload-name opts)
     "append"              (append/workload opts)
     "append-with-deletes" (append-with-deletes/workload opts)
-    "append-single-row"   (append-single-row/workload opts)))
+    "append-single-row"   (append-single-row/workload opts)
+    "kafka-topic"         (kafka-topic/workload opts)))
 
 (defn ydb-unhandled-exceptions [opts]
   (let [wrapped (checker/unhandled-exceptions)]
@@ -322,6 +325,10 @@
              (not= (:model opts) :ydb-serializable))
     (throw (IllegalArgumentException.
              "--with-opindex can be used with --model ydb-serializable only")))
+  (when (and (= (:workload-name opts) "kafka-topic")
+             (< (:kafka-partition-count opts) (:key-count opts)))
+    (throw (IllegalArgumentException.
+             "--kafka-partition-count must be >= --key-count for --workload-name kafka-topic")))
   opts)
 
 (defn ydb-test [opts]
@@ -370,6 +377,7 @@
 
     (merge tests/noop-test
            opts
+           (select-keys workload [:sub-via :txn? :crash-clients? :crash-client-interval])
            {:name               "ydb"
             :db                 the-db
             :os                 ubuntu/os
@@ -382,7 +390,7 @@
                                   {:perf       (checker/perf
                                                  {:nemeses (:perf composed)})
                                    :clock      (checker/clock-plot)
-                                   :stats      (checker/stats)
+                                   :stats      (kafka/stats-checker (checker/stats))
                                    :exceptions (ydb-unhandled-exceptions opts)
                                    :workload   (:checker workload)})
 
@@ -394,7 +402,13 @@
                    (gen/time-limit (:time-limit opts)))
               (gen/log "Recovering cluster state after test...")
               (when final-gen
-                (gen/nemesis final-gen)))})))
+                (gen/nemesis final-gen))
+              (when-let [workload-final-gen (:final-generator workload)]
+                (gen/phases
+                  (gen/log "Running workload final generator...")
+                  (gen/sleep 10)
+                  (gen/time-limit (:kafka-final-time-limit opts)
+                                  (gen/clients workload-final-gen)))))})))
 
 (def all-nemesis-faults
   "Full set of accepted nemesis fault keywords."
@@ -419,6 +433,15 @@
 
 (defn valid-read-replicas? [v]
   (>= v 0))
+
+(defn random-kafka-password
+  "A random password for the kafka-topic workload's self-provisioned YDB
+   user, generated once per test run rather than checked into source. Hex
+   only, since YDB's default password policy only allows letters, digits,
+   and a specific set of special characters, and this sidesteps that set
+   entirely."
+  []
+  (str/replace (str (random-uuid)) "-" ""))
 
 (def cli-opts
   [[nil "--db-name DBNAME"               "YDB database name."
@@ -481,7 +504,55 @@
     "Seconds to wait after recovery before selecting the next attack."
     :default 5 :parse-fn read-string :validate [pos? "Must be positive"]]
    [nil "--store-type TYPE"              "Store type: 'row' or 'column'."
-    :default "row"]])
+    :default "row"]
+
+   [nil "--kafka-port NUM"               "YDB Kafka API port."
+    :default 9092 :parse-fn parse-long :validate [pos? "Must be a positive integer"]]
+   [nil "--kafka-topic-name NAME"        "Topic used by the kafka-topic workload."
+    :default "jepsen_kafka_topic"]
+   [nil "--kafka-partition-count NUM"    "Topic partitions, must be >= --key-count."
+    :default 64 :parse-fn parse-long :validate [pos? "Must be a positive integer"]]
+   [nil "--[no-]kafka-txn"               "Use Kafka producer transactions."
+    :id :txn? :default true]
+   [nil "--kafka-isolation-level LEVEL"  "Consumer isolation level."
+    :default "read_committed"
+    :validate [#{"read_committed" "read_uncommitted"}
+               "Must be read_committed or read_uncommitted"]]
+   [nil "--kafka-transaction-timeout-ms NUM"
+    "Kafka transaction timeout in ms. Must stay above the producer's
+     delivery.timeout.ms (15000, see kafka-client/producer-config) -- otherwise
+     the transaction coordinator can time out and abort a transaction while a
+     send is still legitimately retrying, and comfortably below the server's
+     kafka_proxy_config.transaction_timeout_ms (default 300000)."
+    :default 30000 :parse-fn parse-long :validate [pos? "Must be a positive integer"]]
+   [nil "--[no-]kafka-sasl"              "Authenticate via SASL_PLAINTEXT. Needed on YDB to select the target database over the Kafka protocol; see README."
+    :id :kafka-sasl? :default true]
+   [nil "--kafka-sasl-mechanism NAME"    "SASL mechanism: PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512."
+    :default "PLAIN"
+    :validate [#{"PLAIN" "SCRAM-SHA-256" "SCRAM-SHA-512"}
+               "Must be PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512"]]
+   [nil "--kafka-username NAME"          "SASL username. Created on the cluster during setup if missing. With PLAIN, --db-name is appended automatically unless already present."
+    :default "jepsen"
+    :validate [#(not (str/includes? % "'")) "Must not contain a single quote (used unescaped in YQL)"]]
+   [nil "--kafka-password PASS"          "SASL password. Defaults to a fresh random value generated for this run."
+    :default (random-kafka-password)
+    :validate [#(not (str/includes? % "'")) "Must not contain a single quote (used unescaped in YQL)"]]
+   [nil "--kafka-crash-clients"          "Periodically crash and reopen Kafka clients."
+    :id :crash-clients? :default false]
+   [nil "--kafka-crash-client-interval SECS" "Seconds between client crashes."
+    :id :crash-client-interval :default 30 :parse-fn parse-long
+    :validate [pos? "Must be a positive integer"]]
+   [nil "--kafka-final-time-limit SECS"
+    "Seconds allowed for the workload final generator (jepsen.tests.kafka's
+     catch-up read of every key, seeking to the beginning of each partition).
+     jepsen.tests.kafka's own generator has no meaningful time budget of its
+     own here -- it keeps polling until every key is caught up -- so this is
+     the only real cutoff. Too low a value for the configured --key-count/
+     --max-writes-per-key/--concurrency cuts the catch-up read off before it
+     finishes, which the checker can't distinguish from genuine data loss:
+     it'll report spurious :unseen failures on an otherwise-correct run.
+     Scale this up for larger workloads."
+    :default 300 :parse-fn parse-long :validate [pos? "Must be a positive integer"]]])
 
 (defn -main [& args]
   (cli/run! (merge (cli/single-test-cmd {:test-fn ydb-test

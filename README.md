@@ -21,11 +21,38 @@ export JAVA_CMD=$HOME/jdk-21.0.8+9/bin/java
 table_service_config:
     allow_olap_data_query: true
 ```
-7. Runing jepsen tests
+7. To test topics through the Kafka API (`--workload-name kafka-topic`), enable the Kafka proxy
+   in YDB config:
+```yaml
+kafka_proxy_config:
+    enable_kafka_proxy: true
+    listening_port: 9092
+```
+   `--kafka-txn` (the default) needs the `EnableKafkaTransactions` feature flag, which is a top-level
+   `feature_flags` entry, not part of `kafka_proxy_config`, and defaults to `true` -- most clusters
+   need no extra config for it. Only set it explicitly if your cluster has it turned off:
+```yaml
+feature_flags:
+    enable_kafka_transactions: true
+```
+8. Runing jepsen tests
 
 Please pay attention that some parameters are incompatible.
 
 - The `--with-opindex` option is only compatible with `--model ydb-serializable`.
+- The `kafka-topic` workload needs `--kafka-partition-count` >= `--key-count`, and ignores `--max-txn-length`
+  (transactions are 4 operations long with `--kafka-txn` and 1 otherwise).
+- The `kafka-topic` workload authenticates via `SASL_PLAINTEXT/PLAIN` by default (`--kafka-sasl`), even when
+  the YDB cluster has anonymous auth enabled: YDB is multi-tenant but the Kafka protocol has no notion of
+  database, so the target `--db-name` is conveyed as `user@database` in the SASL username (required by YDB
+  only for the `PLAIN` mechanism). Without this, the proxy resolves topics against some other database and
+  produces fail with `UNKNOWN_TOPIC_OR_PARTITION`. Use `--no-kafka-sasl` only if your cluster doesn't need
+  this.
+- The `kafka-topic` workload's end-of-test catch-up read (which re-reads every key from the beginning to
+  check nothing was lost) is only bounded by `--kafka-final-time-limit` (default 300s) -- too low a value
+  for the configured `--key-count`/`--max-writes-per-key`/`--concurrency` cuts it off before it's done
+  reading, which shows up as spurious `:unseen` failures on an otherwise-correct run. Scale it up for
+  larger workloads.
 
 
  Example command for running the test:
@@ -43,7 +70,23 @@ lein run test \
     --ballast-size 1024 \
     --store-type row
 ```
-8. Run http server for observe results:
+ Example command for running the Kafka API topic workload:
+```bash
+lein run test \
+    --nodes-file ~/ydb-nodes.txt \
+    --db-name /your/db/name \
+    --no-ssh \
+    --concurrency 10n \
+    --workload-name kafka-topic \
+    --kafka-port 9092 \
+    --kafka-topic-name jepsen_kafka_topic \
+    --kafka-partition-count 64 \
+    --key-count 15 \
+    --max-writes-per-key 1000 \
+    --kafka-txn \
+    --kafka-isolation-level read_committed
+```
+9. Run http server for observe results:
 ```bash
 lein run serve -p 9000
 ```

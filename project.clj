@@ -7,7 +7,9 @@
                  [org.clojure/data.json "2.5.0"]
                  [jepsen "0.3.10"]
                  [tech.ydb/ydb-sdk-scheme "2.4.8"]
-                 [tech.ydb/ydb-sdk-query "2.4.8"]]
+                 [tech.ydb/ydb-sdk-query "2.4.8"]
+                 [org.apache.kafka/kafka-clients "3.4.0"
+                  :exclusions [org.slf4j/slf4j-api]]]
   :profiles {:uberjar {:aot :all}}
   :main jepsen.ydb
   :jvm-opts ["-Djava.awt.headless=true"

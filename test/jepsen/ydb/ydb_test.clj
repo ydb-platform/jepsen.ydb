@@ -48,5 +48,20 @@
     (is (thrown-with-msg? IllegalArgumentException
                           #"with-opindex can be used with --model ydb-serializable only"
                           (ydb/validate-opts {:model :snapshot-isolation
-                                              :with-opindex true})))))
+                                              :with-opindex true}))))
+
+  (testing "Valid: kafka-topic with enough partitions"
+    (let [opts {:workload-name "kafka-topic" :key-count 10 :kafka-partition-count 10}]
+      (is (= opts (ydb/validate-opts opts)))))
+
+  (testing "Invalid: kafka-topic with fewer partitions than keys"
+    (is (thrown-with-msg? IllegalArgumentException
+                          #"--kafka-partition-count must be >= --key-count"
+                          (ydb/validate-opts {:workload-name "kafka-topic"
+                                              :key-count 10
+                                              :kafka-partition-count 9}))))
+
+  (testing "Valid: other workloads ignore kafka-partition-count"
+    (let [opts {:workload-name "append" :key-count 10 :kafka-partition-count 1}]
+      (is (= opts (ydb/validate-opts opts))))))
 
