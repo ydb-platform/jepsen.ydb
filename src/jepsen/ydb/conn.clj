@@ -9,7 +9,8 @@
            (tech.ydb.query QueryClient)
            (tech.ydb.query.settings ExecuteQuerySettings)
            (tech.ydb.query.tools QueryReader)
-           (tech.ydb.table.query Params)))
+           (tech.ydb.table.query Params)
+           (tech.ydb.topic TopicClient)))
 
 (defn open-transport
   "Opens a new grpc transport using the specified test and node"
@@ -23,6 +24,12 @@
   "Opens a new query client using the specified transport"
   [transport]
   (-> (QueryClient/newClient transport)
+      .build))
+
+(defn open-topic-client
+  "Opens a new topic client using the specified transport"
+  [transport]
+  (-> (TopicClient/newClient transport)
       .build))
 
 (defn open-session
@@ -53,6 +60,13 @@
 
   (begin! [this]
     "Explicitly begin the transaction, transaction must not be open yet.")
+
+  (ensure-tx! [this]
+    "Ensures a transaction is open on the server (beginning one via begin! when not
+     already open) and returns the raw tech.ydb.query.QueryTransaction object, active
+     and ready to be handed to APIs that need an already-active YdbTransaction handle
+     directly (e.g. topic writer/reader SendSettings/ReceiveSettings), rather than
+     going through execute!.")
 
   (auto-commit! [this]
     "Will cause the next execute! to atomically commit the transaction.")
@@ -104,6 +118,11 @@
                  (.beginTransaction mode)
                  .join
                  .getValue)))
+
+  (ensure-tx! [this]
+    (when (= tx nil)
+      (begin! this))
+    tx)
 
   (auto-commit! [this]
     (set! auto-commit true))
@@ -182,6 +201,22 @@
       .getStatus
       .expectSuccess))
 
+(defn timeout!
+  "Throws an ex-info marking an operation whose outcome is genuinely
+   undetermined because we gave up waiting for a definite server response
+   (e.g. a topic WriteAck or replay-read timeout) -- the operational analog
+   of YDB's own UNDETERMINED status code: even after a subsequent rollback!
+   succeeds client-side, we still don't know whether the server had already
+   registered the timed-out call before we stopped waiting for it.
+
+   with-errors recognizes this specific marker and classifies it :info,
+   without catching exceptions generally -- callers must use this (not a
+   bare ex-info/throw) for with-errors to see it; any other exception still
+   propagates uncaught, so real bugs keep surfacing via the
+   unhandled-exceptions checker instead of being silently absorbed."
+  [msg data]
+  (throw (ex-info msg (assoc data :type ::timeout))))
+
 (defmacro with-errors
   "Takes an op and a code block, will assoc :type :fail or :type :info on known exceptions."
   [op & body]
@@ -204,4 +239,16 @@
            ; Known status codes where operation may have actually committed
            (= status-code# StatusCode/UNDETERMINED) (assoc ~op :type :info, :error [:undetermined (.toString status#)])
            ; For other exceptions we assume we don't know whether it committed or not
-           :else (assoc ~op :type :info, :error [:unexpected-result (.toString status#)]))))))
+           :else (assoc ~op :type :info, :error [:unexpected-result (.toString status#)]))))
+     ; A specific, deliberately-thrown marker (see timeout!) for an
+     ; operation that genuinely timed out waiting for a server response --
+     ; NOT a blanket catch-all. Anything else (a real bug, InterruptedException
+     ; from Jepsen's own shutdown/interruption machinery, etc.) is NOT caught
+     ; here and propagates as before: InterruptedException must reach its
+     ; normal handler to keep Jepsen's interruption protocol intact, and a
+     ; genuine driver bug should surface via the unhandled-exceptions checker
+     ; rather than being silently reclassified as :info.
+     (catch clojure.lang.ExceptionInfo e#
+       (if (= ::timeout (:type (ex-data e#)))
+         (assoc ~op :type :info, :error [:timeout (ex-message e#)])
+         (throw e#)))))

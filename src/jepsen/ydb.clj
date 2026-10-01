@@ -22,7 +22,8 @@
             [jepsen.ydb.append :as append]
             [jepsen.ydb.append-with-deletes :as append-with-deletes]
             [jepsen.ydb.append-single-row :as append-single-row]
-            [jepsen.ydb.kafka-topic :as kafka-topic]))
+            [jepsen.ydb.kafka-topic :as kafka-topic]
+            [jepsen.ydb.topic-table :as topic-table]))
 
 (def dynamic-service "kikimr-multi@31003.service")
 (def storage-service "kikimr.service")
@@ -304,7 +305,8 @@
     "append"              (append/workload opts)
     "append-with-deletes" (append-with-deletes/workload opts)
     "append-single-row"   (append-single-row/workload opts)
-    "kafka-topic"         (kafka-topic/workload opts)))
+    "kafka-topic"         (kafka-topic/workload opts)
+    "topic-table"         (topic-table/workload opts)))
 
 (defn ydb-unhandled-exceptions [opts]
   (let [wrapped (checker/unhandled-exceptions)]
@@ -329,6 +331,10 @@
              (< (:kafka-partition-count opts) (:key-count opts)))
     (throw (IllegalArgumentException.
              "--kafka-partition-count must be >= --key-count for --workload-name kafka-topic")))
+  (when (and (= (:workload-name opts) "topic-table")
+             (not= (:model opts) :ydb-serializable))
+    (throw (IllegalArgumentException.
+             "--workload-name topic-table requires --model ydb-serializable (YDB topic transactions require SERIALIZABLE_RW)")))
   opts)
 
 (defn ydb-test [opts]
@@ -505,6 +511,18 @@
     :default 5 :parse-fn read-string :validate [pos? "Must be positive"]]
    [nil "--store-type TYPE"              "Store type: 'row' or 'column'."
     :default "row"]
+
+   [nil "--topic-name NAME"              "YDB topic name (for --workload-name topic-table)."
+    :default "jepsen_test_topic"]
+   [nil "--topic-partition-count NUM"
+    "Fixed number of partitions for --workload-name topic-table. Keys are
+     hashed onto these partitions, since the elle generator's key space is
+     unbounded over the life of a test."
+    :default 30 :parse-fn parse-long :validate [pos? "Must be a positive integer"]]
+   [nil "--table-key-count NUM"          "Table keys in active rotation, for --workload-name topic-table."
+    :default 10 :parse-fn parse-long :validate [pos? "Must be a positive integer"]]
+   [nil "--topic-key-count NUM"          "Topic keys in active rotation, for --workload-name topic-table."
+    :default 10 :parse-fn parse-long :validate [pos? "Must be a positive integer"]]
 
    [nil "--kafka-port NUM"               "YDB Kafka API port."
     :default 9092 :parse-fn parse-long :validate [pos? "Must be a positive integer"]]

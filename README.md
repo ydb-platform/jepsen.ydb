@@ -53,6 +53,32 @@ Please pay attention that some parameters are incompatible.
   for the configured `--key-count`/`--max-writes-per-key`/`--concurrency` cuts it off before it's done
   reading, which shows up as spurious `:unseen` failures on an otherwise-correct run. Scale it up for
   larger workloads.
+- The `topic-table` workload mixes table and topic operations inside single YDB transactions (native SDK,
+  `TxMode.SERIALIZABLE_RW` only -- YQL alone can't do this), to catch atomicity violations between the two
+  APIs. It requires `--model ydb-serializable`. Table keys work exactly like the `append` workload -- any
+  number of reads/writes, freely mixed -- **as long as the transaction doesn't read a topic key at all**. A
+  transaction that reads a topic key collapses down to just that one lone read: (1) the read is dropped if
+  that same key was already appended to earlier in the same transaction (topics don't make a transaction's
+  own writes visible to reads within that same transaction, so keeping such a read would look like an
+  internal-consistency violation), and (2) if a topic read survives rule 1, *everything else* in the
+  transaction is dropped -- other reads (table included) and all writes (table and topic). This is
+  stricter than "just don't read the same key twice": `execute-topic-read!` is never attached to the
+  transaction (a topic replay read can't be snapshot-pinned regardless), so it always runs strictly
+  *before* the transaction's actual commit -- a different, earlier moment than when anything else in that
+  transaction (including its own writes) takes effect. Mixing it with anything else risks a torn view no
+  real atomic transaction could produce, which Elle would (correctly) flag as an anomaly for the wrong
+  reason. A transaction with no topic read at all has none of this risk -- all its writes commit atomically
+  together and its table reads are properly snapshot-consistent -- so it stays fully unrestricted. This is
+  intentional, not a limitation of the checker setup: earlier, less restrictive versions of this workload
+  hit exactly these false-positive anomalies, in an earlier topics-only proof of concept, in a real cluster
+  run, and in code review. Topic reads/write-your-own-writes consistency is intentionally out of scope here
+  and is
+  covered separately by `kafka-topic`. Use
+  `--table-key-count`/`--topic-key-count` to size the two key spaces (their sum becomes the workload's
+  effective `--key-count`) and `--topic-partition-count`/`--topic-name` to configure the topic. Its
+  end-of-test read sweep (every topic key touched during the run, read back once) is governed by the same
+  `--kafka-final-time-limit` as `kafka-topic`, despite the flag's name -- it's shared final-generator
+  plumbing, not Kafka-specific.
 
 
  Example command for running the test:
@@ -85,6 +111,22 @@ lein run test \
     --max-writes-per-key 1000 \
     --kafka-txn \
     --kafka-isolation-level read_committed
+```
+ Example command for running the mixed table+topic workload:
+```bash
+lein run test \
+    --nodes-file ~/ydb-nodes.txt \
+    --db-name /your/db/name \
+    --no-ssh \
+    --concurrency 10n \
+    --workload-name topic-table \
+    --model ydb-serializable \
+    --topic-name jepsen_test_topic \
+    --topic-partition-count 30 \
+    --table-key-count 10 \
+    --topic-key-count 10 \
+    --max-writes-per-key 1000 \
+    --store-type row
 ```
 9. Run http server for observe results:
 ```bash

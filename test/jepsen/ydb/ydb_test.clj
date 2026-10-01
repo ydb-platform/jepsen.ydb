@@ -63,5 +63,19 @@
 
   (testing "Valid: other workloads ignore kafka-partition-count"
     (let [opts {:workload-name "append" :key-count 10 :kafka-partition-count 1}]
+      (is (= opts (ydb/validate-opts opts)))))
+
+  (testing "Valid: topic-table with ydb-serializable"
+    (let [opts {:workload-name "topic-table" :model :ydb-serializable}]
+      (is (= opts (ydb/validate-opts opts)))))
+
+  (testing "Invalid: topic-table without ydb-serializable"
+    (is (thrown-with-msg? IllegalArgumentException
+                          #"topic-table requires --model ydb-serializable"
+                          (ydb/validate-opts {:workload-name "topic-table"
+                                              :model :snapshot-isolation}))))
+
+  (testing "Valid: other workloads ignore model for the topic-table check"
+    (let [opts {:workload-name "append" :model :snapshot-isolation}]
       (is (= opts (ydb/validate-opts opts))))))
 
