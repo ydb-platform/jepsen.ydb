@@ -389,7 +389,9 @@
             :os                 ubuntu/os
             :net                dual-stack-net
             :concurrency-factor 1
-            :ssh                {:dummy false :strict-host-key-checking false}
+            :ssh                (cond-> {:dummy false :strict-host-key-checking false}
+                                  (System/getenv "JEPSEN_SSH_USERNAME")
+                                  (assoc :username (System/getenv "JEPSEN_SSH_USERNAME")))
             :client             (:client workload)
             :nemesis            (:nemesis composed)
             :checker            (checker/compose
