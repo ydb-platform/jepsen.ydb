@@ -25,15 +25,31 @@ def link(path, label):
 def write_details(run, name, status):
     details = run / "static-report.html"
     results = run / "results.edn"
-    body = "<ul>" + "".join(
-        f"<li>{link(file.name, file.name)}</li>"
-        for file in sorted(run.iterdir())
-        if file.is_file() and file.name != details.name
+    files = [
+        file for file in sorted(run.rglob("*"))
+        if file.is_file() and not file.is_symlink()
+        and run.resolve() in file.resolve().parents and file != details
+    ]
+    body = "<h2>Artifacts</h2><ul>" + "".join(
+        f"<li>{link(file.relative_to(run).as_posix(), file.relative_to(run).as_posix())}</li>"
+        for file in files
     ) + "</ul>"
     if results.is_file():
         body += f"<h2>Checker result</h2><pre>{escape(results.read_text(encoding='utf-8'))}</pre>"
-    for graph in sorted(run.glob("*.png")):
-        body += f'<h2>{escape(graph.stem)}</h2><img src="{quote(graph.name)}" alt="{escape(graph.stem)}" loading="lazy">'
+    images = [file for file in files if file.suffix.lower() in {".png", ".svg", ".jpg", ".jpeg", ".gif"}]
+    html_pages = [file for file in files if file.suffix.lower() in {".html", ".htm"}]
+    if images or html_pages:
+        body += "<h2>Visualizations</h2>"
+    for graph in images:
+        relative = graph.relative_to(run).as_posix()
+        body += (
+            f"<figure><figcaption>{link(relative, relative)}</figcaption>"
+            f'<a href="{escape(quote(relative))}"><img src="{escape(quote(relative))}" '
+            f'alt="{escape(relative)}" loading="lazy"></a></figure>'
+        )
+    for graph in html_pages:
+        relative = graph.relative_to(run).as_posix()
+        body += f"<p>{link(relative, relative)}</p>"
     details.write_text(page(name, f"<p>{escape(status)}</p>" + body), encoding="utf-8")
     return details
 

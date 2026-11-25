@@ -397,6 +397,7 @@
             :checker            (checker/compose
                                   {:perf       (checker/perf
                                                  {:nemeses (:perf composed)})
+                                   :timeline   (timeline/html)
                                    :clock      (checker/clock-plot)
                                    :stats      (kafka/stats-checker (checker/stats))
                                    :exceptions (ydb-unhandled-exceptions opts)
